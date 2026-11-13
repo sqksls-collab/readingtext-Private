@@ -1181,7 +1181,7 @@ function vocabForm(t = {}, videos = [], cats = []) {
       <label class="inline"><input type="radio" name="grading" value="staff" ${grading === 'staff' ? 'checked' : ''}> 선생님·조교가 점수 입력</label></div>
     <label>대상 반<select name="class_id">${classOptions(t.class_id, '모든 반')}</select></label>
     <label><span data-totlabel>${grading === 'self' ? '문항 수' : '만점'}</span><input type="number" name="total" min="1" max="500" required value="${t.total || (grading === 'self' ? last : 100)}"></label>
-    <label>공개 시작 <span class="muted">(이때부터 학생에게 보여요)</span><input type="datetime-local" name="open_at" value="${toLocalInput(t.open_at || new Date().toISOString())}"></label>
+    <label>공개 시작 <span class="muted">(이때부터 학생에게 보이고, 알림도 바로 가요 · 시험지는 학부모에게 안 보여요)</span><input type="datetime-local" name="open_at" value="${toLocalInput(t.open_at || new Date().toISOString())}"></label>
     <label>마감 <span class="muted">(선택)</span><input type="datetime-local" name="due_at" value="${toLocalInput(t.due_at)}"></label>
     <label>해설 영상 <span class="muted">(선택)</span><select name="video_id"><option value="">없음</option>
       ${videos.slice().reverse().map(v => `<option value="${v.id}" ${v.id === t.video_id ? 'selected' : ''}>${esc(v.title)}</option>`).join('')}</select></label>

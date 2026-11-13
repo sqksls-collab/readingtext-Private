@@ -3,6 +3,7 @@
 // action=send  : 선생님이 고른 학생(+학부모)에게 알림 보내기
 // action=test  : 선생님 본인에게 테스트 알림
 // action=auto  : 매일 자동 알림 (새 어휘 테스트 / 마감 24시간 전 미제출) – 예약 작업만 호출 가능
+// action=opened: 5분마다 – 방금 공개된 테스트만 바로 알림 (예약 작업만 호출 가능)
 import webpush from 'npm:web-push@3.6.7';
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
@@ -77,7 +78,7 @@ async function log(kind: string, ref: string, userIds: string[]) {
 }
 const kst = (d: string) => new Date(d).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit' });
 
-async function auto() {
+async function auto(onlyNew = false) {
   const now = new Date(), nowIso = now.toISOString();
   const in24 = new Date(now.getTime() + 24 * 3600e3).toISOString(), ago24 = new Date(now.getTime() - 24 * 3600e3).toISOString();
   const { data: studs } = await admin.from('profiles').select('id, full_name, class_id').eq('role', 'student').eq('status', 'approved');
@@ -106,6 +107,7 @@ async function auto() {
     await sendTo(ids, { title: `📚 새 ${t.category || '테스트'}`, body: `'${t.title}'가 올라왔어요. ${how}`, url: `./#/vocab/${t.id}`, tag: 'vocab_new' + t.id });
     await log('vocab_new', t.id, ids); out.new_vocab += ids.length;
   }
+  if (onlyNew) return out;
 
   // 2) 24시간 안에 마감인 어휘 테스트 미제출 → 학생 + 학부모
   const { data: dv } = await admin.from('vocab_tests').select('*').eq('grading', 'self').lte('open_at', nowIso).gt('due_at', nowIso).lte('due_at', in24);
@@ -145,11 +147,11 @@ Deno.serve(async (req) => {
 
     if (action === 'key') return json({ publicKey: await vapid() });
 
-    if (action === 'auto') {
+    if (action === 'auto' || action === 'opened') {
       const given = req.headers.get('x-cron-secret');
       if (!given || given !== (await getSecret('cron_secret'))) return json({ error: 'forbidden' }, 403);
       await vapid();
-      return json(await auto());
+      return json(await auto(action === 'opened'));
     }
 
     // 여기부터는 로그인한 선생님만
