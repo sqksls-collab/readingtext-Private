@@ -2257,7 +2257,9 @@ async function loadClassBook(classId) {
   if (asgIds.length) (await fetchAll('submissions', 'id,assignment_id,user_id,files,submitted_at,edit_count,edited_after_due', b => b.in('assignment_id', asgIds)))
     .forEach(x => { subs[x.assignment_id + '|' + x.user_id] = x; });
   const rosterById = Object.fromEntries(roster.map(r => [r.id, r]));
-  const B = { roster, days, S, recs, rm, subs, rosterById };
+  const prog = {};
+  if (isHead() && days.length) (await q(sb.from('class_progress').select('*').in('day_id', days.map(d => d.id)))).forEach(p => { prog[p.day_id] = p; });
+  const B = { roster, days, S, recs, rm, subs, rosterById, prog };
   B.sub = (d, k, r) => d[k + '_asg'] && r?.profile_id ? subs[d[k + '_asg'] + '|' + r.profile_id] || null : null;
   B.auto = (d, k, r) => autoHw(d, k, rm[d.id + '|' + r.id], B.sub(d, k, r));
   B.eff = (d, r) => effRec(d, rm[d.id + '|' + r.id], k => B.sub(d, k, r));
@@ -2356,6 +2358,7 @@ function recDays(main, head, cls, B) {
     const tests = [d.t1_name, d.t2_name].filter(Boolean).join(', ');
     return `<tr style="cursor:pointer" onclick="location.hash='/t/records/${cls.id}/day/${d.id}'"><td><b>${d.day ? REC.md(d.day) : esc(d.label || '기타')}</b>${d.day && d.day > todayISO() ? ' ' + badge('예정') : ''}</td>
       <td>${esc(trunc(d.hw1_sms || d.hw1 || '-', 34))}${d.hw2 ? `<br><span class="small muted">${esc(trunc(d.hw2, 30))}</span>` : ''}</td><td>${esc(tests || '-')}</td>
+      ${isHead() ? `<td class="small" style="white-space:normal;min-width:140px">${esc(trunc(B.prog[d.id]?.done || '', 40)) || '<span class="na">-</span>'}</td>` : ''}
       <td>${recs.length}명</td><td>${bad ? badge(`미해결 ${bad}`, 'bad') : recs.length ? badge('깨끗', 'ok') : '-'}</td></tr>`;
   };
   const last = dated[0] || {};
@@ -2366,7 +2369,7 @@ function recDays(main, head, cls, B) {
       <label style="margin:0;flex:1;min-width:160px">이름 <span class="muted">(날짜 없는 시험만, 예: 동형모고 2회)</span><input name="label"></label>
       <button class="btn primary">추가</button></form>
       <p class="muted small" style="margin-bottom:0">지난 수업일 설정을 복사하고 회차는 하나씩 올려요(송모 7회 → 8회). 열어서 확인만 하면 돼요.</p></div>
-    <div class="card tbl-wrap">${dated.length + extra.length ? `<table><thead><tr><th>수업일</th><th>숙제</th><th>테스트</th><th>기록</th><th>상태</th></tr></thead>
+    <div class="card tbl-wrap">${dated.length + extra.length ? `<table><thead><tr><th>수업일</th><th>숙제</th><th>테스트</th>${isHead() ? '<th>진도 🔒</th>' : ''}<th>기록</th><th>상태</th></tr></thead>
       <tbody>${dated.map(row).join('')}${extra.map(row).join('')}</tbody></table>` : empty('아직 수업일이 없어요')}</div>
     <p class="muted small">재원생 ${active.length}명 · 반 코드 <b>${esc(cls.join_code)}</b></p>`;
   const f = main.querySelector('#nf');
@@ -2431,6 +2434,13 @@ function recDay(main, head, cls, B, dayId) {
   const checkBtns = ['hw1', 'hw2'].filter(k => d[k]).map(k => `<a class="btn sm ${k === 'hw1' ? 'primary' : ''}" href="#/t/records/${cls.id}/check/${d.id}/${k}">✓ ${esc(trunc(d[k === 'hw1' ? 'hw1_sms' : 'hw2'] || d[k], 12))} 검사하기</a>`).join('');
   main.innerHTML = head + `<a class="back" href="#/t/records/${cls.id}">← 수업일 목록</a>
     <div class="flex between wrap" style="margin:8px 0 12px"><h2 style="margin:0">${d.day ? `${REC.md(d.day)} 수업` : esc(d.label || '기타 시험')}</h2><div class="flex wrap" style="gap:6px">${checkBtns}</div></div>
+    ${isHead() && d.day ? (() => { const p = B.prog[d.id] || {}, prev = B.days.filter(x => x.day && x.day < d.day).pop(), pn = prev && B.prog[prev.id]?.next;
+      return `<div class="card" id="prog"><div class="flex between wrap"><h2 style="margin:0">수업 진도 <span class="small muted">🔒 선생님만 보여요 (조교·학생·학부모 X)</span></h2><span class="small muted" id="psave"></span></div>
+        ${pn ? `<p class="small" style="background:#f6f5f1;border-radius:8px;padding:8px 10px;margin:10px 0 0">지난 시간(${REC.md(prev.day)})에 적은 '다음 시간 할 것': ${esc(pn)}</p>` : ''}
+        <div class="form-grid" style="margin-top:10px">
+          <label>오늘 나간 진도<textarea data-p="done" style="min-height:70px" placeholder="예: 매무새 111~120쪽, 중세국어 8종성법까지">${esc(p.done || '')}</textarea></label>
+          <label>다음 시간 할 것<textarea data-p="next" style="min-height:70px" placeholder="예: 121쪽부터, 복습 테스트">${esc(p.next || '')}</textarea></label>
+          <label class="full">메모<textarea data-p="memo" style="min-height:50px" placeholder="반 분위기, 다음에 다시 짚을 것 등">${esc(p.memo || '')}</textarea></label></div></div>`; })() : ''}
     <div class="card"><details ${fresh ? 'open' : ''}><summary style="font-weight:700">숙제·테스트 설정 ${fresh ? '' : '<span class="muted small">(눌러서 바꾸기)</span>'}</summary>
       <form id="df" class="form-grid" style="margin-top:12px">
         ${d.day ? field('day', '날짜', d.day, 'type="date"') : field('label', '이름', d.label)}
@@ -2453,6 +2463,14 @@ function recDay(main, head, cls, B, dayId) {
         ${d.hw1 ? `<th>${esc(trunc(d.hw1_sms || d.hw1, 14))}</th><th>달성률%</th><th>해결일</th>` : ''}${hasHw2 ? `<th>${esc(trunc(d.hw2, 14))}</th><th>달성률%</th><th>해결일</th>` : ''}
         ${T.map(t => `<th>${esc(d[t + '_name'])}</th><th>통과일</th>`).join('')}<th>판정</th><th>메모</th><th></th></tr></thead>
         <tbody>${people.map(rowHTML).join('')}</tbody></table></div></div>`;
+
+  // 수업 진도 (자동 저장)
+  const pc = main.querySelector('#prog');
+  if (pc) { let pt;
+    const psave = async () => { const o = { day_id: d.id, updated_at: new Date().toISOString() };
+      pc.querySelectorAll('[data-p]').forEach(t => { o[t.dataset.p] = t.value.trim() || null; });
+      try { await q(sb.from('class_progress').upsert(o, { onConflict: 'day_id' })); B.prog[d.id] = o; pc.querySelector('#psave').textContent = '저장됨 ✓'; } catch (e) {} };
+    pc.addEventListener('input', () => { pc.querySelector('#psave').textContent = '…'; clearTimeout(pt); pt = setTimeout(psave, 800); }); }
 
   // 자주 쓰는 숙제
   const f = main.querySelector('#df');
