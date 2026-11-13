@@ -2828,12 +2828,24 @@ async function myBookCard(profileId, who) {
   const subOf = d => k => subs.find(x => x.assignment_id === d[k + '_asg']) || null;
   const rm = Object.fromEntries(recs.map(x => [x.day_id, x])), recOf = d => effRec(d, rm[d.id], subOf(d));
   const open = REC.open(days, recOf, S, todayISO());
-  const done = days.filter(d => d.day && recOf(d)).sort((a, b) => b.day.localeCompare(a.day));
+  const done = days.filter(d => d.day && d.day <= todayISO() && recOf(d)).sort((a, b) => b.day.localeCompare(a.day));
   const last = done[0];
   const lastItems = last ? REC.items(last, recOf(last), S) : [];
   const lines = its => its.map(x => `<div class="flex between" style="padding:7px 0;border-bottom:1px solid var(--line);gap:8px"><span>${esc(x.kind === 'hw' ? '숙제 · ' + x.name : x.name + ' 테스트')}</span>
     ${badge(esc(x.short) + (x.bad && x.done ? ' → 완료' : ''), x.bad && x.done ? 'ok' : J_CLS[x.j] || '')}</div>`).join('');
-  return `<div class="card"><h2>${who === 'parent' ? '수업 기록' : '내 수업 기록'}</h2>
+  const today = todayISO(), nextDay = days.filter(d => d.day && d.day >= today).sort((a, b) => a.day.localeCompare(b.day))[0];
+  const hwLine = (d, k) => { if (!d[k]) return ''; const sub = subOf(d)(k), asg = d[k + '_asg'];
+    const how = asg ? (sub ? badge('제출함', 'ok') : badge('사진 제출', 'blue')) : badge('현장 확인');
+    const range = d[k + '_items'] ? `<div class="small muted">검사 범위: ${esc(d[k + '_items'])}${d[k + '_photos'] ? ` · 사진 ${d[k + '_photos']}장` : ''}</div>` : '';
+    return `<div class="flex between" style="padding:8px 0;border-bottom:1px solid var(--line);gap:8px;align-items:flex-start">
+      <div><b>${esc(d[k])}</b>${range}</div>${asg && who !== 'parent' ? `<a href="#/assignment/${asg}" style="flex-shrink:0">${how}</a>` : `<span style="flex-shrink:0">${how}</span>`}</div>`; };
+  const tests = nextDay ? [nextDay.t1_name, nextDay.t2_name].filter(Boolean) : [];
+  const nextHTML = nextDay && (nextDay.hw1 || nextDay.hw2 || tests.length) ? `<div style="border:2px solid var(--primary);border-radius:12px;padding:12px 14px;margin-bottom:14px">
+      <b style="color:var(--primary)">${REC.md(nextDay.day)} 수업까지 해 올 것</b>
+      ${hwLine(nextDay, 'hw1')}${hwLine(nextDay, 'hw2')}
+      ${tests.length ? `<div class="small" style="margin-top:8px">테스트: <b>${tests.map(esc).join(', ')}</b></div>` : ''}
+      ${nextDay.hw_due && (nextDay.hw1_asg || nextDay.hw2_asg) ? `<div class="small muted" style="margin-top:4px">사진 제출 마감: ${fmtDate(nextDay.hw_due)}</div>` : ''}</div>` : '';
+  return `<div class="card"><h2>${who === 'parent' ? '수업 기록' : '내 수업 기록'}</h2>${nextHTML}
     ${open.length ? `<div style="background:var(--bad-weak);border-radius:10px;padding:10px 14px;margin-bottom:12px"><b style="color:var(--bad)">아직 안 끝난 것 ${open.length}개</b>
       ${open.map(it => `<div class="small" style="margin-top:4px">${REC.md(it.day.day)} · ${esc(it.todo)}</div>`).join('')}</div>`
       : `<p class="small" style="color:var(--ok);font-weight:700;margin-top:0">밀린 숙제·재시험 없음 👍</p>`}
