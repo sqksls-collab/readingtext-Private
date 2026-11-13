@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>송지희 국어 · 클로드</title>
+<title>송지희 국어</title>
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#ffffff">
 <link rel="icon" type="image/png" href="icons/favicon.png">
@@ -195,7 +195,7 @@ details summary{cursor:pointer;color:var(--primary);font-size:13px}
 const SUPABASE_URL = 'https://oijqmkpguethqbegkgci.supabase.co';
 const SUPABASE_KEY = 'sb_publishable__B3Orlvtfod5KE0Y-5WRvg_mfUSBz1-';
 const SITE_NAME    = '송지희 국어';
-const VERSION_TAG  = '클로드 버전';
+const VERSION_TAG  = '';
 const FREE_STORAGE_MB = 1024;   // Supabase 무료 요금제 파일 저장 공간
 
 const BUCKET_SEC   = 5;    // 시청 구간 단위(초)
@@ -531,7 +531,7 @@ function layout(active) {
     ? [['/t', '대시보드'], ['/t/records', '수업 기록'], ['/t/students', '학생 관리'], ['/t/videos', '수업 영상'], ['/t/assignments', '숙제'], ['/t/vocab', '테스트'], ['/t/classes', '반 관리']]
     : [['/', '홈'], ['/videos', '수업 영상'], ['/assignments', '숙제'], ['/vocab', '테스트'], ['/report', '내 성적']];
   $app.innerHTML = `<div class="layout">
-    <aside class="side"><img src="icons/emblem.png" alt="송지희 국어" class="m-logo"><div class="brand"><img src="icons/logo-horizontal.png" alt="${esc(SITE_NAME)}"><small>${VERSION_TAG}</small></div>
+    <aside class="side"><img src="icons/emblem.png" alt="송지희 국어" class="m-logo"><div class="brand"><img src="icons/logo-horizontal.png" alt="${esc(SITE_NAME)}">${VERSION_TAG ? `<small>${VERSION_TAG}</small>` : ''}</div>
       <nav class="nav">${items.map(([h, l]) => `<a href="#${h}" class="${h === active ? 'on' : ''}">${l}</a>`).join('')}
         ${isStandalone() ? '' : '<a href="#" class="mobile-only" data-install>📱 앱 설치</a>'}<a href="#" class="mobile-only" data-logout>로그아웃</a></nav>
       <div class="me"><b>${esc(p.full_name || p.email)}</b><br>${T ? (isHead() ? '선생님' : '조교') : P ? '학부모' : esc(className(p.class_id) || '반 미배정')}<br>
@@ -548,7 +548,7 @@ function layout(active) {
 /* ---------------- 로그인 / 가입 ---------------- */
 function renderLogin() {
   $app.innerHTML = `<div class="auth"><div class="card auth-card">
-    <img class="auth-logo" src="icons/logo-vertical.png" alt="${esc(SITE_NAME)}"><span class="ver">${VERSION_TAG}</span>
+    <img class="auth-logo" src="icons/logo-vertical.png" alt="${esc(SITE_NAME)}">${VERSION_TAG ? `<span class="ver">${VERSION_TAG}</span>` : ''}
     ${inApp ? `<div class="bulk small" style="margin-bottom:14px">카카오톡 안에서 열렸어요. 로그인이 자꾸 풀리면 <a href="#" data-install><b>다른 브라우저로 열기</b></a>를 해 주세요.</div>` : ''}
     <form id="f"><label>이메일<input name="email" type="email" required autocomplete="email"></label>
       <label>비밀번호<input name="password" type="password" required autocomplete="current-password"></label>
