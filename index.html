@@ -1801,7 +1801,7 @@ async function tStudent(id) {
       <label>반<select id="cls"><option value="">미배정</option>${classOptions(s.class_id)}</select></label>
       <label>상태<select id="st">${[['pending', '승인 대기'], ['approved', '승인'], ['rejected', '거절']].map(([v, l]) => `<option value="${v}" ${s.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       <label class="full">선생님 메모 <span class="muted">(학생에게 보이지 않아요)</span><textarea id="memo" placeholder="상담 내용, 특이사항 등">${esc(note?.memo || '')}</textarea></label></div>
-      <div class="flex between wrap"><div class="flex wrap">${isHead() && s.id !== uid() ? `<button class="btn sm" id="ta">${s.role === 'assistant' ? '조교 권한 해제' : '조교로 지정'}</button>
+      <div class="flex between wrap"><div class="flex wrap">${s.role === 'student' && s.status === 'approved' ? `<button class="btn sm primary" id="pushOne">🔔 알림 보내기${state.pushUsers?.has(s.id) ? '' : ' (알림 안 켬)'}</button>` : ''}${isHead() && s.id !== uid() ? `<button class="btn sm" id="ta">${s.role === 'assistant' ? '조교 권한 해제' : '조교로 지정'}</button>
         <button class="btn sm danger" id="role">${s.role === 'teacher' ? '선생님 권한 해제' : '선생님 권한 주기'}</button>` : ''}</div>
         <button class="btn primary" id="save">저장</button></div></div>
     <div class="card"><h2>영상 진도</h2>${vs.length ? `<div class="tbl-wrap"><table><thead><tr><th>영상</th><th>진도</th><th>시청 시간</th><th>마지막 시청</th></tr></thead><tbody>
@@ -1819,6 +1819,7 @@ async function tStudent(id) {
       toast('저장했어요');
     } finally { busy(e.target, false); }
   };
+  document.getElementById('pushOne')?.addEventListener('click', () => sendPushModal([s], { title: '송지희 국어', body: '' }));
   document.getElementById('ta')?.addEventListener('click', async () => {
     const toTA = s.role !== 'assistant';
     if (!confirm(toTA ? `${s.full_name}님을 조교로 지정할까요?\n학생 관리, 채점, 점수 입력, 알림 보내기를 할 수 있어요. (권한 변경·반 삭제는 못 해요)` : '조교 권한을 해제하고 학생으로 돌릴까요?')) return;
