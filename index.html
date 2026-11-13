@@ -2709,17 +2709,28 @@ function recBlack(main, head, cls, B) {
     <div class="card">${groups.length ? groups.map(g => `<div style="padding:10px 0;border-bottom:1px solid var(--line)">
         <div class="flex between wrap"><b>${esc(g.r.name)} ${badge(g.items.length + '개', g.items.length >= 2 ? 'bad' : 'warn')}</b>
           <button class="btn sm" data-remind="${g.r.id}">학생에게 알림</button></div>
-        ${g.items.map(it => `<div class="flex between" style="margin-top:6px;gap:8px"><span class="small"><span class="muted">${REC.md(it.day.day)}</span> ${esc(it.todo)} <span class="muted">(${esc(it.short)})</span></span>
-          <button class="btn sm primary" data-fix="${it.day.id}|${g.r.id}|${it.key}">해결</button></div>`).join('')}</div>`).join('')
+        ${g.items.map(it => `<div class="flex" style="margin-top:6px;gap:10px;align-items:center;padding:6px 8px;border-radius:8px;background:#faf9f6">
+          <button class="btn sm" data-fix="${it.day.id}|${g.r.id}|${it.key}" style="flex-shrink:0">✓ 해결</button>
+          <span class="small"><span class="muted">${REC.md(it.day.day)}</span> ${esc(it.todo)} <span class="muted">(${esc(it.short)})</span></span></div>`).join('')}</div>`).join('')
       : empty('남은 항목이 없어요! 🎉')}</div>`;
   main.addEventListener('click', async e => {
     const b = e.target.closest('[data-fix]');
     if (b) {
       const [dayId, rid, k] = b.dataset.fix.split('|'), rec = B.rm[dayId + '|' + rid];
-      const dt = prompt(k.startsWith('t') ? '통과한 날짜 (재시험·응시 후 통과)' : '해결한 날짜 (제출·보완 완료)', today);
-      if (!dt) return;
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) return toast('날짜는 2026-11-14 처럼 적어 주세요', 'err');
-      await q(sb.from('class_records').update({ [k + '_done']: dt, updated_at: new Date().toISOString() }).eq('id', rec.id)); toast('해결 처리했어요'); route();
+      const g = groups.find(x => x.r.id === rid), it = g.items.find(x => x.day.id === dayId && x.key === k);
+      const m = modal(`<h2>해결 처리할까요?</h2>
+        <div style="background:#faf9f6;border-radius:10px;padding:12px 14px;margin:6px 0 12px">
+          <b style="font-size:17px">${esc(g.r.name)}</b><br>
+          <span>${REC.md(it.day.day)} · ${esc(it.todo)}</span> <span class="muted small">(${esc(it.short)})</span></div>
+        <label>${k.startsWith('t') ? '통과한 날짜 (재시험·응시 후 통과)' : '해결한 날짜 (제출·보완 완료)'}<input type="date" id="fd" value="${today}"></label>
+        <p class="muted small" style="margin-top:0">다음 주간 문자에 '완료'로 들어가요. 잘못 눌렀으면 그 수업일 기록 표에서 날짜를 지우면 돼요.</p>
+        <div class="flex wrap"><button class="btn primary" id="fok">해결 처리</button><button class="btn" data-close>취소</button></div>`);
+      m.querySelector('#fok').onclick = async e => {
+        const dt = m.querySelector('#fd').value; if (!dt) return toast('날짜를 골라 주세요', 'err');
+        busy(e.currentTarget, true);
+        await q(sb.from('class_records').update({ [k + '_done']: dt, updated_at: new Date().toISOString() }).eq('id', rec.id));
+        m.remove(); toast(`${g.r.name} · ${it.todo} 해결 처리했어요`); route();
+      };
     }
     const rm = e.target.closest('[data-remind]');
     if (rm) {
