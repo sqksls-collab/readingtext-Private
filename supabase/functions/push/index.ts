@@ -4,6 +4,7 @@
 // action=test  : 선생님 본인에게 테스트 알림
 // action=auto  : 매일 자동 알림 (새 어휘 테스트 / 마감 24시간 전 미제출) – 예약 작업만 호출 가능
 // action=opened: 5분마다 – 방금 공개된 테스트만 바로 알림 (예약 작업만 호출 가능)
+// action=staff_notify: 학생이 블랙리스트 해결·질문을 올리면 선생님·조교에게 알림 (학생 본인 확인)
 import webpush from 'npm:web-push@3.6.7';
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
@@ -125,10 +126,12 @@ async function auto(onlyNew = false) {
 
   // 3) 24시간 안에 마감인 숙제 미제출 → 학생 + 학부모
   const { data: da } = await admin.from('assignments').select('*').gt('due_at', nowIso).lte('due_at', in24);
+  const { data: ro } = await admin.from('roster').select('profile_id, mode').not('profile_id', 'is', null);
+  const modeOf = new Map((ro || []).map((r: any) => [r.profile_id, r.mode]));
   for (const a of da || []) {
     const { data: ss } = await admin.from('submissions').select('user_id').eq('assignment_id', a.id);
     const done = new Set((ss || []).map((r: any) => r.user_id));
-    const missing = target(a).filter((s: any) => !done.has(s.id));
+    const missing = target(a).filter((s: any) => !done.has(s.id) && (!a.only_online || modeOf.get(s.id) === '인강'));
     const ids = await notLogged('asg_due', a.id, missing.map((s: any) => s.id));
     if (ids.length) {
       await sendTo(ids, { title: '📝 숙제 마감 임박', body: `'${a.title}' 마감이 ${kst(a.due_at)}이에요. 아직 안 냈어요.`, url: `./#/assignment/${a.id}`, tag: 'asg_due' + a.id });
@@ -136,7 +139,38 @@ async function auto(onlyNew = false) {
     }
     await remindParents('asg_due_p', a.id, missing, (s) => `${s.full_name} 학생이 숙제 '${a.title}'를 아직 내지 않았어요. (마감 ${kst(a.due_at)})`, (s) => `./#/child/${s.id}`);
   }
+  // 4) 결석 보충 영상: 수업일 + 3일이 지나도록 90% 미만이면 학생·학부모에게 한 번
+  const kstToday = new Date(now.getTime() + 9 * 3600e3).toISOString().slice(0, 10);
+  const d3 = new Date(Date.parse(kstToday) - 3 * 86400e3).toISOString().slice(0, 10);
+  const d14 = new Date(Date.parse(kstToday) - 14 * 86400e3).toISOString().slice(0, 10);
+  const { data: vdays } = await admin.from('class_days').select('id, day, video_id, class_id').not('video_id', 'is', null).lte('day', d3).gte('day', d14);
+  (out as any).absent_video = 0;
+  for (const d of vdays || []) {
+    const { data: recs } = await admin.from('class_records').select('roster_id, hw1, hw2, t1_flag, t2_flag, roster:roster_id(name, profile_id, status)').eq('day_id', d.id);
+    const absent = (recs || []).filter((r: any) => [r.hw1, r.hw2, r.t1_flag, r.t2_flag].includes('결석') && r.roster?.profile_id && r.roster?.status === '재원');
+    if (!absent.length) continue;
+    const { data: v } = await admin.from('videos').select('title').eq('id', d.video_id).maybeSingle();
+    const { data: prog } = await admin.from('video_progress').select('user_id, percent, completed').eq('video_id', d.video_id).in('user_id', absent.map((r: any) => r.roster.profile_id));
+    const pm = new Map((prog || []).map((p: any) => [p.user_id, p]));
+    const md = `${+d.day.slice(5, 7)}/${+d.day.slice(8, 10)}`;
+    for (const r of absent) {
+      const sid = r.roster.profile_id, p: any = pm.get(sid);
+      if (p?.completed || (p?.percent ?? 0) >= 90) continue;
+      const ok = await notLogged('absent_video', d.id, [sid]);
+      if (!ok.length) continue;
+      const pct = p?.percent ?? 0;
+      await sendTo([sid], { title: '📺 결석 보충 영상', body: `${md} 수업 영상 '${v?.title || ''}'을 아직 다 보지 않았어요. (현재 ${pct}%)`, url: `./#/video/${d.video_id}`, tag: 'absent_video' + d.id });
+      const links = await parentsOf([sid]);
+      if (links.length) await sendTo(links.map((l) => l.parent_id), { title: `📺 ${r.roster.name} 학생 결석 보충 영상`, body: `${md} 수업 영상을 아직 다 보지 않았어요. (현재 ${pct}%)`, url: `./#/child/${sid}`, tag: 'absent_video_p' + d.id });
+      await log('absent_video', d.id, [sid]); (out as any).absent_video++;
+    }
+  }
   return out;
+}
+
+async function staffIds() {
+  const { data } = await admin.from('profiles').select('id').in('role', ['teacher', 'assistant']).eq('status', 'approved');
+  return (data || []).map((x: any) => x.id);
 }
 
 Deno.serve(async (req) => {
@@ -154,9 +188,29 @@ Deno.serve(async (req) => {
       return json(await auto(action === 'opened'));
     }
 
-    // 여기부터는 로그인한 선생님만
     const authHeader = req.headers.get('Authorization') || '';
     const userClient = createClient(SB_URL, PUBLISHABLE_KEY, { global: { headers: { Authorization: authHeader } }, auth: { persistSession: false } });
+
+    // 학생 → 선생님·조교 알림 (본인이 방금 올린 것만)
+    if (action === 'staff_notify') {
+      const { data: u } = await userClient.auth.getUser(authHeader.replace(/^Bearer\s+/i, ''));
+      if (!u?.user) return json({ error: 'login required' }, 401);
+      const { data: me } = await admin.from('profiles').select('full_name').eq('id', u.user.id).maybeSingle();
+      const since = new Date(Date.now() - 10 * 60e3).toISOString();
+      let payload: Payload | null = null, ref = '';
+      if (body.kind === 'bl') {
+        const { data: x } = await admin.from('bl_submissions').select('id, roster:roster_id(class_id)').eq('id', body.id).eq('user_id', u.user.id).gte('created_at', since).maybeSingle();
+        if (x) { ref = x.id; payload = { title: '📌 블랙리스트 해결 제출', body: `${me?.full_name || '학생'}이(가) 해결 사진을 올렸어요. 확인해 주세요.`, url: `./#/t/records/${(x as any).roster?.class_id}/black` }; }
+      } else if (body.kind === 'q') {
+        const { data: x } = await admin.from('questions').select('id, status').eq('id', body.id).eq('user_id', u.user.id).maybeSingle();
+        if (x) { ref = x.id; payload = { title: x.status === 'confused' ? '🤔 아직 어려워요' : '❓ 새 질문', body: `${me?.full_name || '학생'}: ${String(body.preview || '').slice(0, 80)}`, url: `./#/t/qna/${x.id}` }; }
+      }
+      if (!payload) return json({ error: 'not found' }, 404);
+      await vapid();
+      return json(await sendTo(await staffIds(), { ...payload, tag: 'staff' + ref }));
+    }
+
+    // 여기부터는 로그인한 선생님만
     const { data: isTeacher } = await userClient.rpc('is_teacher');
     if (!isTeacher) return json({ error: '선생님만 알림을 보낼 수 있어요' }, 403);
     await vapid();

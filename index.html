@@ -536,8 +536,8 @@ async function route() {
 function layout(active) {
   const p = state.profile, T = isStaff(), P = p.role === 'parent';
   const items = P ? [['/', '홈'], ...(state.kids || []).map(k => ['/child/' + k.id, k.full_name])] : T
-    ? [['/t', '대시보드'], ['/t/records', '수업 기록'], ['/t/students', '학생 관리'], ['/t/videos', '수업 영상'], ['/t/assignments', '숙제'], ['/t/vocab', '테스트'], ['/t/classes', '반 관리']]
-    : [['/', '홈'], ['/videos', '수업 영상'], ['/assignments', '숙제'], ['/vocab', '테스트'], ['/report', '내 성적']];
+    ? [['/t', '대시보드'], ['/t/records', '수업 기록'], ['/t/students', '학생 관리'], ['/t/videos', '수업 영상'], ['/t/assignments', '숙제'], ['/t/vocab', '테스트'], ['/t/qna', '질문'], ['/t/classes', '반 관리']]
+    : [['/', '홈'], ['/videos', '수업 영상'], ['/assignments', '숙제'], ['/vocab', '테스트'], ['/qna', '질문'], ['/report', '내 성적']];
   $app.innerHTML = `<div class="layout">
     <aside class="side"><img src="icons/emblem.png" alt="송지희 국어" class="m-logo"><div class="brand"><img src="icons/logo-horizontal.png" alt="${esc(SITE_NAME)}">${VERSION_TAG ? `<small>${VERSION_TAG}</small>` : ''}</div>
       <nav class="nav">${items.map(([h, l]) => `<a href="#${h}" class="${h === active ? 'on' : ''}">${l}</a>`).join('')}
@@ -826,6 +826,7 @@ async function studentRoute([a, b]) {
   if (a === 'assignment') return sAssignment(b);
   if (a === 'vocab') return b ? sVocab(b) : sVocabList();
   if (a === 'report') return sReport();
+  if (a === 'qna') return sQna(b);
   location.hash = '/';
 }
 
@@ -1575,8 +1576,8 @@ async function pHome() {
 async function pChild(id) {
   const main = layout('/child/' + id);
   if (!state.kids.find(k => k.id === id)) { main.innerHTML = `<div class="card">${empty('연결된 자녀가 아니에요')}</div>`; return; }
-  const [r, book] = await Promise.all([loadReport(id), myBookCard(id, 'parent').catch(() => '')]);
-  main.innerHTML = `<div id="pushbar" class="no-print"></div>` + `<div class="no-print">${book}</div>` + reportHTML(r);
+  const [r, book, fee] = await Promise.all([loadReport(id), myBookCard(id, 'parent').catch(() => ''), parentFeeCard(id).catch(() => '')]);
+  main.innerHTML = `<div id="pushbar" class="no-print"></div>` + `<div class="no-print">${fee}${book}</div>` + reportHTML(r);
   fillPushBar();
 }
 
@@ -1589,6 +1590,7 @@ async function teacherRoute([a, b, c, d, e, f]) {
                   assignments: tAssignments, assignment: tAssignment, vocab: c => c ? tVocab(c) : tVocabList(), report: tReport };
   if (!b) return tDash();
   if (b === 'records') return tRecords(c, d, e, f);
+  if (b === 'qna') return tQna(c);
   if (pages[b]) return pages[b](c);
   location.hash = '/t';
 }
@@ -2270,20 +2272,21 @@ async function loadClassBook(classId) {
   if (isHead() && days.length) (await q(sb.from('class_progress').select('*').in('day_id', days.map(d => d.id)))).forEach(p => { prog[p.day_id] = p; });
   const B = { roster, days, S, recs, rm, subs, rosterById, prog };
   B.sub = (d, k, r) => d[k + '_asg'] && r?.profile_id ? subs[d[k + '_asg'] + '|' + r.profile_id] || null : null;
-  B.auto = (d, k, r) => autoHw(d, k, rm[d.id + '|' + r.id], B.sub(d, k, r));
-  B.eff = (d, r) => effRec(d, rm[d.id + '|' + r.id], k => B.sub(d, k, r));
+  B.auto = (d, k, r) => autoHw(d, k, rm[d.id + '|' + r.id], B.sub(d, k, r), r);
+  B.eff = (d, r) => effRec(d, rm[d.id + '|' + r.id], k => B.sub(d, k, r), r);
   B.recOf = rid => d => B.eff(d, rosterById[rid]);
   return B;
 }
 // 사진 제출로 자동 판정: 사진 올림 → 제출, 마감까지 없음 → 미제출 (선생님이 직접 고른 값이 있으면 그게 우선)
-function autoHw(d, k, rec, sub) {
-  if (!d[k] || !d[k + '_asg'] || (rec && rec[k])) return null;
+const hwTargets = (d, r) => d.hw_target !== 'online' || r?.mode === '인강';
+function autoHw(d, k, rec, sub, r) {
+  if (!d[k] || !d[k + '_asg'] || (rec && rec[k]) || !hwTargets(d, r)) return null;
   if (sub && subFiles(sub).length) return '제출';
   if (d.hw_due && new Date(d.hw_due) < Date.now()) return '미제출';
   return null;
 }
-function effRec(d, rec, subOf) {
-  const a1 = autoHw(d, 'hw1', rec, subOf('hw1')), a2 = autoHw(d, 'hw2', rec, subOf('hw2'));
+function effRec(d, rec, subOf, r) {
+  const a1 = autoHw(d, 'hw1', rec, subOf('hw1'), r), a2 = autoHw(d, 'hw2', rec, subOf('hw2'), r);
   if (!a1 && !a2) return rec || null;
   return { ...(rec || {}), ...(a1 ? { hw1: a1 } : {}), ...(a2 ? { hw2: a2 } : {}) };
 }
@@ -2334,7 +2337,7 @@ function messageModal(r, msg, opts = {}) {
     toast(`학부모 ${data.students?.users ?? pushable.length}명에게 알림을 보냈어요`); mark();
   });
 }
-const recTabs = (cid, on) => `<div class="flex wrap" style="margin-bottom:14px;gap:6px">${[['', '수업일'], ['black', '블랙리스트'], ['month', '월간 요약'], ['roster', '명단']]
+const recTabs = (cid, on) => `<div class="flex wrap" style="margin-bottom:14px;gap:6px">${[['', '수업일'], ['black', '블랙리스트'], ['month', '월간 요약'], ['fees', '교재비'], ['roster', '명단']]
   .map(([k, l]) => `<a class="btn sm ${on === k ? 'primary' : ''}" href="#/t/records/${cid}${k ? '/' + k : ''}">${l}</a>`).join('')}</div>`;
 
 async function tRecords(cid, sub, extra, extra2) {
@@ -2353,6 +2356,7 @@ async function tRecords(cid, sub, extra, extra2) {
   if (sub === 'day') return recDay(main, head, cls, B, extra);
   if (sub === 'check') return recCheck(main, head, cls, B, extra, extra2);
   if (sub === 'black') return recBlack(main, head, cls, B);
+  if (sub === 'fees') return recFees(main, head, cls, B, extra);
   if (sub === 'month') return recMonth(main, head, cls, B, extra);
   if (sub === 'roster') return recRoster(main, head, cls, B);
   return recDays(main, head, cls, B);
@@ -2454,12 +2458,16 @@ function recDay(main, head, cls, B, dayId) {
       <form id="df" class="form-grid" style="margin-top:12px">
         ${d.day ? field('day', '날짜', d.day, 'type="date"') : field('label', '이름', d.label)}
         <label>사진 제출 마감<input type="datetime-local" name="hw_due" value="${localDT(d.hw_due)}"></label>
+        <label>사진 제출 대상<select name="hw_target"><option value="all" ${d.hw_target !== 'online' ? 'selected' : ''}>반 전체</option><option value="online" ${d.hw_target === 'online' ? 'selected' : ''}>인강생만 (현장생은 현장 검사)</option></select></label>
+        <label>결석 보충 영상 <span class="muted">(결석생이 3일 안에 안 보면 알림)</span><select name="video_id" data-cur="${d.video_id || ''}"><option value="">(없음)</option></select></label>
         ${hwBlock('hw1', '숙제①')}${hwBlock('hw2', '숙제② (선택)')}
         <div class="full" style="border-top:1px solid var(--line);padding-top:12px;margin-top:4px"><b>테스트</b></div>
         ${field('t1_name', '테스트1 이름', d.t1_name, 'placeholder="예: 7회 어휘"')}${modeSel('t1')}
         ${field('t1_cut', '테스트1 기준 (틀린 개수면 이 개수 이상 불통과 / 점수면 이 점수 미만 불통과)', d.t1_cut, 'type="number" step="any"')}<span></span>
         ${field('t2_name', '테스트2 이름 (선택)', d.t2_name)}${modeSel('t2')}
         ${field('t2_cut', '테스트2 기준', d.t2_cut, 'type="number" step="any"')}<span></span>
+        <label>테스트1 결과 가져오기 <span class="muted">(테스트 메뉴에서)</span><select name="t1_test" data-cur="${d.t1_test || ''}"><option value="">(직접 입력)</option></select></label>
+        <label>테스트2 결과 가져오기<select name="t2_test" data-cur="${d.t2_test || ''}"><option value="">(직접 입력)</option></select></label>
         <label class="full">공통 안내문 <span class="muted">(주간 문자 맨 아래에 붙어요. 선택)</span><textarea name="notice" style="min-height:90px">${esc(d.notice || '')}</textarea></label>
         <div class="full flex between"><button class="btn primary">설정 저장</button>${isHead() ? '<button type="button" class="btn danger" id="ddel">이 수업일 삭제</button>' : ''}</div>
       </form></details></div>
@@ -2483,6 +2491,11 @@ function recDay(main, head, cls, B, dayId) {
 
   // 자주 쓰는 숙제
   const f = main.querySelector('#df');
+  Promise.all([q(sb.from('videos').select('id,title,class_id').order('created_at', { ascending: false })), q(sb.from('vocab_tests').select('id,title,class_id,open_at').order('open_at', { ascending: false }).limit(200))]).then(([vs, ts]) => {
+    const mine = x => !x.class_id || x.class_id === cls.id;
+    const fill = (sel, list) => { const cur = sel.dataset.cur; sel.insertAdjacentHTML('beforeend', list.filter(mine).map(x => `<option value="${x.id}" ${x.id === cur ? 'selected' : ''}>${esc(x.title)}</option>`).join('')); };
+    fill(f.video_id, vs); fill(f.t1_test, ts); fill(f.t2_test, ts);
+  }).catch(() => {});
   let tpls = [];
   const fillTpl = async () => { tpls = await q(sb.from('hw_templates').select('*').order('name'));
     f.querySelectorAll('[data-tpl]').forEach(s => { s.innerHTML = `<option value="">자주 쓰는 숙제 불러오기${tpls.length ? '' : ' (아직 없음)'}</option>` + tpls.map(t => `<option value="${t.id}">${esc(t.name)}${t.items ? ' · ' + esc(t.items) : ''}</option>`).join(''); }); };
@@ -2512,6 +2525,8 @@ function recDay(main, head, cls, B, dayId) {
       ['hw1', 'hw1_sms', 'hw2', 't1_name', 't1_mode', 't2_name', 't2_mode', 'notice', 'label', 'day', 'hw1_unit', 'hw1_items', 'hw2_unit', 'hw2_items'].forEach(k => { if (f[k]) row[k] = v(k) || null; });
       ['t1_cut', 't2_cut', 'hw1_photos', 'hw2_photos'].forEach(k => { row[k] = v(k) === '' ? null : +v(k); });
       row.hw_due = v('hw_due') ? new Date(v('hw_due')).toISOString() : null;
+      row.hw_target = f.hw_target.value; row.video_id = f.video_id.value || null; row.t1_test = f.t1_test.value || null; row.t2_test = f.t2_test.value || null;
+      const resync = row.t1_test !== (d.t1_test || null) || row.t2_test !== (d.t2_test || null);
       if (row.t1_mode === 'wrong' && row.t1_cut == null) row.t1_cut = +B.S.default_cut || 4;
       if (row.t2_mode === 'wrong' && row.t2_cut == null && row.t2_name) row.t2_cut = +B.S.default_cut || 4;
       for (const k of ['hw1', 'hw2']) {
@@ -2526,7 +2541,7 @@ function recDay(main, head, cls, B, dayId) {
             row[k + '_unit'] && items.length ? `검사 범위: ${row[k + '_items']} (${items.length}${unitWord(row[k + '_unit'])})` : '',
             row[k + '_photos'] ? `사진 ${row[k + '_photos']}장 필요` : '',
             '한 장에 한 쪽씩 찍어 주세요. 두 쪽을 한 장에 찍으면 글씨가 작아져서 검사가 안 돼요.'].filter(Boolean).join('\n');
-          const asg = { class_id: cls.id, title: `${md}${row[k]}`, description: desc, due_at: row.hw_due, lock_after_due: true, photos_needed: row[k + '_photos'] || null };
+          const asg = { class_id: cls.id, title: `${md}${row[k]}`, description: desc, due_at: row.hw_due, lock_after_due: true, photos_needed: row[k + '_photos'] || null, only_online: row.hw_target === 'online' };
           if (d[k + '_asg']) await q(sb.from('assignments').update(asg).eq('id', d[k + '_asg']));
           else row[k + '_asg'] = (await q(sb.from('assignments').insert(asg).select('id').single())).id;
         } else if (d[k + '_asg']) {
@@ -2535,7 +2550,9 @@ function recDay(main, head, cls, B, dayId) {
           else { await q(sb.from('assignments').delete().eq('id', d[k + '_asg'])); row[k + '_asg'] = null; }
         }
       }
-      await q(sb.from('class_days').update(row).eq('id', d.id)); toast('저장했어요'); route();
+      await q(sb.from('class_days').update(row).eq('id', d.id));
+      if (resync && (row.t1_test || row.t2_test)) { const n = await q(sb.rpc('sync_day_tests', { p_day: d.id })); toast(`저장했어요 · 테스트 결과 ${n}건 가져옴`); } else toast('저장했어요');
+      route();
     } catch (err) { busy(btn, false); }
   };
   main.querySelector('#ddel')?.addEventListener('click', async () => {
@@ -2700,12 +2717,13 @@ async function recCheck(main, head, cls, B, dayId, k) {
   draw();
 }
 
-function recBlack(main, head, cls, B) {
+async function recBlack(main, head, cls, B) {
+  const pend = await blPendingHTML(cls, B).catch(() => '');
   const today = todayISO();
   const groups = B.roster.filter(r => r.status === '재원').map(r => ({ r, items: REC.open(B.days, B.recOf(r.id), B.S, today) })).filter(g => g.items.length)
     .sort((a, b) => b.items.length - a.items.length);
   const total = groups.reduce((n, g) => n + g.items.length, 0);
-  main.innerHTML = head + recTabs(cls.id, 'black') + `
+  main.innerHTML = head + recTabs(cls.id, 'black') + pend + `
     <div class="grid stats">${stat(total, '남은 항목')}${stat(groups.length, '해당 학생')}${stat(groups.filter(g => g.items.length >= 2).length, '2개 이상')}</div>
     <div class="card">${groups.length ? groups.map(g => `<div style="padding:10px 0;border-bottom:1px solid var(--line)">
         <div class="flex between wrap"><b>${esc(g.r.name)} ${badge(g.items.length + '개', g.items.length >= 2 ? 'bad' : 'warn')}</b>
@@ -2715,6 +2733,9 @@ function recBlack(main, head, cls, B) {
           <span class="small"><span class="muted">${REC.md(it.day.day)}</span> ${esc(it.todo)} <span class="muted">(${esc(it.short)})</span></span></div>`).join('')}</div>`).join('')
       : empty('남은 항목이 없어요! 🎉')}</div>`;
   main.addEventListener('click', async e => {
+    const ok = e.target.closest('[data-blok]'), redo = e.target.closest('[data-blredo]');
+    if (ok) return blReview(ok.dataset.blok, true, B);
+    if (redo) return blReview(redo.dataset.blredo, false, B);
     const b = e.target.closest('[data-fix]');
     if (b) {
       const [dayId, rid, k] = b.dataset.fix.split('|'), rec = B.rm[dayId + '|' + rid];
@@ -2827,15 +2848,16 @@ async function myBookCard(profileId, who) {
   const asgIds = days.flatMap(d => [d.hw1_asg, d.hw2_asg]).filter(Boolean);
   const subs = asgIds.length ? await q(sb.from('submissions').select('assignment_id,files,file_path,file_name').eq('user_id', profileId).in('assignment_id', asgIds)).catch(() => []) : [];
   const subOf = d => k => subs.find(x => x.assignment_id === d[k + '_asg']) || null;
-  const rm = Object.fromEntries(recs.map(x => [x.day_id, x])), recOf = d => effRec(d, rm[d.id], subOf(d));
+  const rm = Object.fromEntries(recs.map(x => [x.day_id, x])), recOf = d => effRec(d, rm[d.id], subOf(d), r);
   const open = REC.open(days, recOf, S, todayISO());
+  const bls = open.length ? await q(sb.from('bl_submissions').select('record_id,item_key,status,reply,created_at').eq('roster_id', r.id).order('created_at')).catch(() => []) : [];
   const done = days.filter(d => d.day && d.day <= todayISO() && recOf(d)).sort((a, b) => b.day.localeCompare(a.day));
   const last = done[0];
   const lastItems = last ? REC.items(last, recOf(last), S) : [];
   const lines = its => its.map(x => `<div class="flex between" style="padding:7px 0;border-bottom:1px solid var(--line);gap:8px"><span>${esc(x.kind === 'hw' ? '숙제 · ' + x.name : x.name + ' 테스트')}</span>
     ${badge(esc(x.short) + (x.bad && x.done ? ' → 완료' : ''), x.bad && x.done ? 'ok' : J_CLS[x.j] || '')}</div>`).join('');
   const today = todayISO(), nextDay = days.filter(d => d.day && d.day >= today).sort((a, b) => a.day.localeCompare(b.day))[0];
-  const hwLine = (d, k) => { if (!d[k]) return ''; const sub = subOf(d)(k), asg = d[k + '_asg'];
+  const hwLine = (d, k) => { if (!d[k]) return ''; const sub = subOf(d)(k), asg = hwTargets(d, r) ? d[k + '_asg'] : null;
     const how = asg ? (sub ? badge('제출함', 'ok') : badge('사진 제출', 'blue')) : badge('현장 확인');
     const range = d[k + '_items'] ? `<div class="small muted">검사 범위: ${esc(d[k + '_items'])}${d[k + '_photos'] ? ` · 사진 ${d[k + '_photos']}장` : ''}</div>` : '';
     return `<div class="flex between" style="padding:8px 0;border-bottom:1px solid var(--line);gap:8px;align-items:flex-start">
@@ -2848,12 +2870,283 @@ async function myBookCard(profileId, who) {
       ${nextDay.hw_due && (nextDay.hw1_asg || nextDay.hw2_asg) ? `<div class="small muted" style="margin-top:4px">사진 제출 마감: ${fmtDate(nextDay.hw_due)}</div>` : ''}</div>` : '';
   return `<div class="card"><h2>${who === 'parent' ? '수업 기록' : '내 수업 기록'}</h2>${nextHTML}
     ${open.length ? `<div style="background:var(--bad-weak);border-radius:10px;padding:10px 14px;margin-bottom:12px"><b style="color:var(--bad)">아직 안 끝난 것 ${open.length}개</b>
-      ${open.map(it => `<div class="small" style="margin-top:4px">${REC.md(it.day.day)} · ${esc(it.todo)}</div>`).join('')}</div>`
+      ${open.map(it => { const rec = rm[it.day.id], bs = rec && bls.filter(x => x.record_id === rec.id && x.item_key === it.key).pop();
+        const st = !bs ? '' : bs.status === 'pending' ? badge('확인 대기', 'warn') : bs.status === 'redo' ? `${badge('다시 제출', 'bad')} <span class="small">${esc(bs.reply || '')}</span>` : '';
+        const canSend = who !== 'parent' && rec && (!bs || bs.status === 'redo');
+        return `<div class="flex between" style="margin-top:6px;gap:8px;align-items:center"><span class="small">${REC.md(it.day.day)} · ${esc(it.todo)} ${st}</span>
+          ${canSend ? `<button class="btn sm" style="flex-shrink:0" onclick="blSubmit('${rec.id}','${it.key}','${r.id}', this.dataset.l)" data-l="${esc(REC.md(it.day.day) + ' · ' + it.todo)}">📷 해결 제출</button>` : ''}</div>`; }).join('')}</div>`
       : `<p class="small" style="color:var(--ok);font-weight:700;margin-top:0">밀린 숙제·재시험 없음 👍</p>`}
     ${last ? `<div class="small muted" style="margin-bottom:2px">${REC.md(last.day)} 수업 결과</div>${lines(lastItems)}` : ''}
     ${done.length > 1 ? `<details style="margin-top:10px"><summary class="small" style="font-weight:700">지난 수업 결과 보기</summary>
       ${done.slice(1).map(d => `<div class="small muted" style="margin-top:10px">${REC.md(d.day)}</div>${lines(REC.items(d, recOf(d), S))}`).join('')}</details>` : ''}
     ${last?.notice ? `<details style="margin-top:10px"><summary class="small" style="font-weight:700">선생님 안내</summary><p class="small" style="white-space:pre-wrap">${esc(last.notice)}</p></details>` : ''}</div>`;
+}
+
+/* =====================================================================
+   묶음 기능: 사진 올리기 창 · 교재비 · 블랙리스트 해결 제출 · 질문하기
+   ===================================================================== */
+// 사진(여러 장) + 메모를 받아서 submissions 버킷에 올리고 [{path,name,type,size}] 를 돌려줌
+function photoNoteModal({ title, desc = '', notePh = '메모 (선택)', needPhoto = true, folder }) {
+  return new Promise(resolve => {
+    let picked = [];
+    const m = modal(`<h2>${title}</h2>${desc ? `<p class="small muted" style="margin-top:0">${desc}</p>` : ''}
+      <label class="btn" style="display:inline-flex;gap:6px;cursor:pointer">📷 사진 고르기<input type="file" accept="image/*" multiple id="pp" style="display:none"></label>
+      <div class="upl-grid" id="pv" style="margin-top:10px"></div>
+      <textarea id="pn" placeholder="${notePh}" style="min-height:70px;margin-top:6px"></textarea>
+      <div class="flex wrap" style="margin-top:10px"><button class="btn primary" id="pok">올리기</button><button class="btn" data-close>취소</button></div>`);
+    const draw = () => { m.querySelector('#pv').innerHTML = picked.map((f, i) => `<div class="upl-item"><img src="${URL.createObjectURL(f)}" alt=""><button class="x" data-rm="${i}" style="position:absolute;top:4px;right:4px" aria-label="빼기">×</button></div>`).join(''); };
+    m.querySelector('#pp').onchange = e => { picked.push(...e.target.files); e.target.value = ''; draw(); };
+    m.querySelector('#pv').onclick = e => { const b = e.target.closest('[data-rm]'); if (b) { picked.splice(+b.dataset.rm, 1); draw(); } };
+    m.querySelector('[data-close]').addEventListener('click', () => resolve(null));
+    m.querySelector('#pok').onclick = async e => {
+      const note = m.querySelector('#pn').value.trim();
+      if (needPhoto && !picked.length) return toast('사진을 1장 이상 골라 주세요', 'err');
+      if (!picked.length && !note) return toast('내용을 써 주세요', 'err');
+      const btn = e.currentTarget; busy(btn, true, '올리는 중…');
+      try {
+        const files = [];
+        for (let k = 0; k < picked.length; k++) {
+          btn.textContent = `올리는 중… (${k + 1}/${picked.length})`;
+          const orig = picked[k], file = await shrinkImage(orig);
+          const path = `${uid()}/${folder}/${Date.now()}_${k}.${fileExt(file.name)}`;
+          await q(sb.storage.from('submissions').upload(path, file, { contentType: file.type || undefined }));
+          files.push({ path, name: orig.name, type: file.type || '', size: file.size });
+        }
+        m.remove(); resolve({ files, note });
+      } catch (err) { busy(btn, false); }
+    };
+  });
+}
+async function photoStrip(files, size = 72) {
+  const imgs = (files || []).filter(isImg);
+  if (!imgs.length) return '';
+  const urls = await signUrls('submissions', imgs.map(f => f.path));
+  const id = 'ps' + Math.random().toString(36).slice(2, 8);
+  setTimeout(() => document.getElementById(id)?.addEventListener('click', e => {
+    const i = e.target.closest('[data-i]'); if (i) lightbox(imgs.map(f => ({ url: urls[f.path], name: f.name })), +i.dataset.i);
+  }), 0);
+  return `<div id="${id}" class="flex wrap" style="gap:6px;margin-top:6px">${imgs.map((f, i) => urls[f.path] ? `<img data-i="${i}" src="${urls[f.path]}" alt="" style="width:${size}px;height:${size}px;object-fit:cover;border-radius:8px;cursor:zoom-in;border:1px solid var(--line)">` : '').join('')}</div>`;
+}
+const staffNotify = (kind, id, preview = '') => sb.functions.invoke('push', { body: { action: 'staff_notify', kind, id, preview } }).catch(() => {});
+
+/* ---------- 3) 블랙리스트 해결 제출 (학생) ---------- */
+async function blSubmit(recordId, key, rosterId, label) {
+  const r = await photoNoteModal({ title: '해결 제출', desc: `${esc(label)}<br>보완한 숙제나 재시험지를 찍어서 올려 주세요. 선생님이 확인하면 목록에서 빠져요.`, notePh: '한마디 (선택)', folder: 'bl' });
+  if (!r) return;
+  const row = await q(sb.from('bl_submissions').insert({ record_id: recordId, item_key: key, roster_id: rosterId, files: r.files, note: r.note || null }).select('id').single());
+  staffNotify('bl', row.id);
+  toast('올렸어요! 선생님 확인을 기다려 주세요'); route();
+}
+// 선생님 블랙리스트 탭 맨 위: 확인 대기
+async function blPendingHTML(cls, B) {
+  const ids = B.roster.map(r => r.id);
+  if (!ids.length) return '';
+  const subs = await q(sb.from('bl_submissions').select('*').in('roster_id', ids).eq('status', 'pending').order('created_at'));
+  if (!subs.length) return '';
+  const rows = await Promise.all(subs.map(async s => {
+    const rec = B.recs.find(x => x.id === s.record_id), d = rec && B.days.find(x => x.id === rec.day_id), r = B.rosterById[s.roster_id];
+    const it = d && REC.items(d, B.eff(d, r), B.S).find(x => x.key === s.item_key);
+    return `<div style="padding:10px 0;border-bottom:1px solid var(--line)">
+      <div class="flex between wrap" style="gap:8px"><span><b>${esc(r?.name || '')}</b> <span class="small muted">${d ? REC.md(d.day) : ''} · ${esc(it?.todo || s.item_key)}</span>
+        <span class="small muted">· ${fmtDate(s.created_at)}</span></span>
+        <span class="flex" style="gap:6px"><button class="btn sm primary" data-blok="${s.id}">✓ 해결 인정</button><button class="btn sm" data-blredo="${s.id}">↩ 다시</button></span></div>
+      ${s.note ? `<div class="small" style="margin-top:4px">“${esc(s.note)}”</div>` : ''}${await photoStrip(s.files, 84)}</div>`;
+  }));
+  return `<div class="card" style="border:2px solid var(--primary)"><h2 style="margin-top:0">학생이 올린 해결 · 확인 대기 <span class="badge warn">${subs.length}</span></h2>${rows.join('')}</div>`;
+}
+async function blReview(id, ok, B) {
+  const s = await q(sb.from('bl_submissions').select('*').eq('id', id).single());
+  if (ok) {
+    const rec = B.recs.find(x => x.id === s.record_id) || await q(sb.from('class_records').select('*').eq('id', s.record_id).single());
+    const dt = todayISO();
+    await q(sb.from('class_records').update({ [s.item_key + '_done']: dt, updated_at: new Date().toISOString() }).eq('id', rec.id));
+    await q(sb.from('bl_submissions').update({ status: 'ok', reviewed_at: new Date().toISOString() }).eq('id', id));
+    toast('해결 처리했어요'); route();
+  } else {
+    const why = prompt('다시 제출할 이유를 한 줄로 적어 주세요 (학생에게 보여요)', '');
+    if (why === null) return;
+    await q(sb.from('bl_submissions').update({ status: 'redo', reply: why.trim() || '다시 제출해 주세요', reviewed_at: new Date().toISOString() }).eq('id', id));
+    const p = await q(sb.from('profiles').select('id').eq('id', s.user_id).maybeSingle());
+    if (p) sb.functions.invoke('push', { body: { action: 'send', user_ids: [p.id], title: '↩ 다시 제출해 주세요', body: why.trim() || '블랙리스트 해결을 다시 올려 주세요', url: './' } });
+    toast('학생에게 다시 제출하라고 알렸어요'); route();
+  }
+}
+
+/* ---------- 2) 교재비 ---------- */
+const won = n => (+n || 0).toLocaleString('ko-KR') + '원';
+const feeMsg = (f, name) => (f.message || '안녕하세요, 송지희국어입니다.\n{이름} 학생 {항목} {금액} 안내드립니다.\n확인 부탁드립니다. 감사합니다.')
+  .replaceAll('{이름}', name).replaceAll('{항목}', f.title).replaceAll('{금액}', won(f.amount));
+async function recFees(main, head, cls, B, feeId) {
+  const fees = await q(sb.from('fees').select('*').eq('class_id', cls.id).order('created_at', { ascending: false }));
+  const items = fees.length ? await q(sb.from('fee_items').select('*').in('fee_id', fees.map(f => f.id))) : [];
+  const fee = fees.find(f => f.id === feeId) || fees[0];
+  const its = fee ? items.filter(x => x.fee_id === fee.id) : [];
+  const rows = its.map(x => ({ x, r: B.rosterById[x.roster_id] })).filter(y => y.r).sort((a, b) => (!!a.x.paid_at - !!b.x.paid_at) || a.r.name.localeCompare(b.r.name));
+  const unpaid = rows.filter(y => !y.x.paid_at);
+  main.innerHTML = head + recTabs(cls.id, 'fees') + `
+    <div class="card"><h2 style="margin-top:0">새 교재비</h2><form id="ff" class="flex wrap" style="align-items:flex-end">
+      <label style="margin:0;flex:1;min-width:150px">항목<input name="title" placeholder="예: 11월 매무새 교재비" required></label>
+      <label style="margin:0">금액(원)<input name="amount" type="number" min="0" step="100" style="width:120px" required></label>
+      <button class="btn primary">만들기</button></form>
+      <p class="small muted" style="margin-bottom:0">재원생 전원에게 청구돼요. 낼 필요 없는 학생은 만든 뒤 '제외'를 누르면 돼요. 학부모 화면에만 보여요.</p></div>
+    ${fees.length ? `<div class="flex wrap" style="gap:6px;margin-bottom:12px">${fees.map(f => { const n = items.filter(x => x.fee_id === f.id && !x.paid_at).length;
+      return `<a class="btn sm ${f.id === fee.id ? 'primary' : ''}" href="#/t/records/${cls.id}/fees/${f.id}">${esc(f.title)}${n ? ` · 미납 ${n}` : ' ✓'}</a>`; }).join('')}</div>
+    <div class="card"><div class="flex between wrap"><h2 style="margin:0">${esc(fee.title)} <span class="muted small">${won(fee.amount)}</span></h2>
+      <span class="flex wrap" style="gap:6px"><button class="btn sm" id="fmsg">알림 문구 수정</button>${unpaid.length ? `<button class="btn sm primary" id="fpush">미납 ${unpaid.length}명 학부모에게 알림</button>` : ''}</span></div>
+      <p class="small muted">낸 사람 ${rows.length - unpaid.length} / ${rows.length}명</p>
+      ${rows.map(({ x, r }) => `<div class="flex between" style="padding:8px 0;border-bottom:1px solid var(--line);gap:8px">
+        <span><b>${esc(r.name)}</b> ${x.paid_at ? badge(`납부 ${REC.md(x.paid_at)}`, 'ok') : badge('미납', 'bad')}${x.notified_at ? ` <span class="small muted">알림 ${fmtDate(x.notified_at)}</span>` : ''}</span>
+        <span class="flex" style="gap:6px">${x.paid_at ? `<button class="btn sm" data-unpay="${x.id}">취소</button>` : `<button class="btn sm primary" data-pay="${x.id}">✓ 냄</button>${r.parent_phone ? `<a class="btn sm" href="#" data-fsms="${x.id}">📱</a>` : ''}`}
+          ${isHead() ? `<button class="btn sm" data-fdel="${x.id}">제외</button>` : ''}</span></div>`).join('') || empty('청구 대상이 없어요')}
+      ${isHead() ? '<p style="margin-bottom:0"><button class="btn sm danger" id="feedel">이 교재비 삭제</button></p>' : ''}</div>` : `<div class="card">${empty('아직 교재비가 없어요')}</div>`}`;
+  const f = main.querySelector('#ff');
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const nf = await q(sb.from('fees').insert({ class_id: cls.id, title: f.title.value.trim(), amount: +f.amount.value }).select().single());
+    const targets = B.roster.filter(r => r.status === '재원');
+    if (targets.length) await q(sb.from('fee_items').insert(targets.map(r => ({ fee_id: nf.id, roster_id: r.id }))));
+    toast('교재비를 만들었어요'); location.hash = `/t/records/${cls.id}/fees/${nf.id}`;
+  };
+  if (!fee) return;
+  main.querySelector('#fmsg')?.addEventListener('click', () => {
+    const m = modal(`<h2>알림 문구</h2><p class="small muted" style="margin-top:0">{이름} {항목} {금액}은 자동으로 바뀌어요. 입금 계좌 등을 적어 두세요.</p>
+      <textarea id="fm" style="min-height:160px">${esc(fee.message || feeMsg({ title: '{항목}', amount: 0 }, '{이름}').replace('0원', '{금액}'))}</textarea>
+      <div class="flex wrap" style="margin-top:10px"><button class="btn primary" id="fms">저장</button><button class="btn" data-close>닫기</button></div>`);
+    m.querySelector('#fms').onclick = async () => { await q(sb.from('fees').update({ message: m.querySelector('#fm').value.trim() || null }).eq('id', fee.id)); m.remove(); toast('저장했어요'); route(); };
+  });
+  let parentsP = null;
+  main.querySelector('#fpush')?.addEventListener('click', async e => {
+    const parents = await (parentsP ||= loadParentsByRoster(B.roster));
+    const withPush = unpaid.filter(y => (parents[y.r.id] || []).some(p => p.push)), noPush = unpaid.filter(y => !withPush.includes(y));
+    const m = modal(`<h2>미납 알림</h2>
+      <p class="small">🔔 앱 알림 가능 <b>${withPush.length}명</b> · 📱 문자로 보낼 사람 <b>${noPush.length}명</b></p>
+      ${withPush.length ? `<button class="btn primary" id="fpall">앱 알림 ${withPush.length}명에게 보내기</button>` : ''}
+      <div class="people" style="margin-top:10px">${noPush.map(({ x, r }) => `<div class="flex between"><span>${esc(r.name)} <span class="small muted">${esc(r.parent_phone || '번호 없음')}</span></span>${r.parent_phone ? `<a class="btn sm" href="#" data-fsms="${x.id}">📱 문자</a>` : ''}</div>`).join('')}</div>
+      <div class="flex wrap" style="margin-top:10px"><button class="btn" data-close>닫기</button></div>`);
+    m.querySelector('#fpall')?.addEventListener('click', async ev => {
+      const b = ev.currentTarget; busy(b, true, '보내는 중…'); let n = 0;
+      for (const { x, r } of withPush) {
+        const ids = (parents[r.id] || []).filter(p => p.push).map(p => p.id);
+        const { error } = await sb.functions.invoke('push', { body: { action: 'send', user_ids: ids, title: `${fee.title} 안내`, body: feeMsg(fee, r.name).split('\n').slice(1).join(' ').slice(0, 300), url: r.profile_id ? `./#/child/${r.profile_id}` : './' } });
+        if (!error) { n++; await sb.from('fee_items').update({ notified_at: new Date().toISOString() }).eq('id', x.id); }
+      }
+      busy(b, false); b.textContent = `보냄 ✓ (${n}명)`; b.disabled = true;
+    });
+    m.addEventListener('click', ev => feeSms(ev, its, fee, B));
+  });
+  main.addEventListener('click', async ev => {
+    feeSms(ev, its, fee, B);
+    const p = ev.target.closest('[data-pay]'), u = ev.target.closest('[data-unpay]'), dl = ev.target.closest('[data-fdel]');
+    if (p) { await q(sb.from('fee_items').update({ paid_at: todayISO() }).eq('id', p.dataset.pay)); route(); }
+    if (u) { await q(sb.from('fee_items').update({ paid_at: null }).eq('id', u.dataset.unpay)); route(); }
+    if (dl && confirm('이 학생을 이번 교재비 청구에서 뺄까요?')) { await q(sb.from('fee_items').delete().eq('id', dl.dataset.fdel)); route(); }
+    if (ev.target.id === 'feedel' && confirm(`'${fee.title}' 교재비를 통째로 지울까요?`)) { await q(sb.from('fees').delete().eq('id', fee.id)); location.hash = `/t/records/${cls.id}/fees`; }
+  });
+}
+function feeSms(ev, its, fee, B) {
+  const s = ev.target.closest('[data-fsms]'); if (!s) return;
+  ev.preventDefault(); ev.stopPropagation();
+  const x = its.find(y => y.id === s.dataset.fsms), r = B.rosterById[x.roster_id], body = feeMsg(fee, r.name);
+  if (/android|iphone|ipad/i.test(UA) || isIOS) location.href = smsHref(r.parent_phone, body); else { copy(body); toast('PC에서는 복사했어요. 폰에서 누르면 문자 앱이 열려요.'); }
+  sb.from('fee_items').update({ notified_at: new Date().toISOString() }).eq('id', x.id).then(() => {});
+  s.textContent = '📱 ✓';
+}
+// 학부모 화면 카드
+async function parentFeeCard(childId) {
+  const ro = await q(sb.from('roster').select('id').eq('profile_id', childId));
+  if (!ro.length) return '';
+  const items = await q(sb.from('fee_items').select('*, fee:fee_id(title, amount, message)').in('roster_id', ro.map(r => r.id)).is('paid_at', null));
+  if (!items.length) return '';
+  return `<div class="card" style="border:2px solid var(--bad)"><h2 style="margin-top:0">교재비 안내</h2>${items.map(x => `<div class="flex between" style="padding:8px 0;border-bottom:1px solid var(--line)">
+    <span>${esc(x.fee?.title || '')}</span><span><b>${won(x.fee?.amount)}</b> ${badge('미납', 'bad')}</span></div>`).join('')}
+    ${items[0].fee?.message ? `<p class="small muted" style="white-space:pre-wrap;margin-bottom:0">${esc(items[0].fee.message.replaceAll('{이름}', '').replaceAll('{항목}', items[0].fee.title).replaceAll('{금액}', won(items[0].fee.amount)))}</p>` : '<p class="small muted" style="margin-bottom:0">입금 후 선생님이 확인하면 사라져요.</p>'}</div>`;
+}
+
+/* ---------- 6) 질문하기 ---------- */
+const Q_ST = { open: ['답변 대기', 'warn'], answered: ['답변 완료 · 확인 안 함', 'blue'], resolved: ['이해했어요 ✓', 'ok'], confused: ['아직 어려워요', 'bad'] };
+async function qThreadHTML(qq, msgs, people) {
+  const parts = await Promise.all(msgs.map(async mm => { const mine = mm.author_id === qq.user_id;
+    return `<div style="margin:10px 0;display:flex;${mine ? '' : 'justify-content:flex-end'}"><div style="max-width:85%;background:${mine ? '#f2f1ec' : '#e7f0ec'};border-radius:12px;padding:10px 12px">
+      <div class="small muted">${esc(people[mm.author_id] || (mine ? '학생' : '선생님'))} · ${fmtDate(mm.created_at)}</div>
+      ${mm.body ? `<div style="white-space:pre-wrap;margin-top:4px">${esc(mm.body)}</div>` : ''}${await photoStrip(mm.files, 120)}</div></div>`; }));
+  return parts.join('');
+}
+async function sQna(id) {
+  const main = layout('/qna');
+  if (!id) {
+    const qs = await q(sb.from('questions').select('*').eq('user_id', uid()).order('updated_at', { ascending: false }));
+    main.innerHTML = `<h1 class="page">질문하기</h1>
+      <div class="card"><p style="margin-top:0">모르는 문제나 지문을 사진으로 찍어 물어보세요. <b>선생님만</b> 볼 수 있어요.</p><button class="btn primary" id="qnew">＋ 새 질문</button></div>
+      <div class="card">${qs.length ? qs.map(x => `<a class="row" href="#/qna/${x.id}"><div class="row-main"><div class="row-title">${esc(x.title || '질문')}</div><div class="row-sub">${fmtDate(x.created_at)}</div></div>${badge(...Q_ST[x.status])}</a>`).join('') : empty('아직 질문이 없어요')}</div>`;
+    main.querySelector('#qnew').onclick = async () => {
+      const r = await photoNoteModal({ title: '새 질문', desc: '문제나 지문 사진과 함께, 어디가 궁금한지 적어 주세요.', notePh: '예: 3번 선지가 왜 틀린지 모르겠어요', needPhoto: false, folder: 'qna' });
+      if (!r) return;
+      const qq = await q(sb.from('questions').insert({ title: (r.note || '사진 질문').split('\n')[0].slice(0, 40) }).select().single());
+      await q(sb.from('question_msgs').insert({ question_id: qq.id, body: r.note || null, files: r.files }));
+      staffNotify('q', qq.id, r.note || '사진 질문'); toast('질문을 올렸어요'); location.hash = '/qna/' + qq.id;
+    };
+    return;
+  }
+  const qq = await q(sb.from('questions').select('*').eq('id', id).maybeSingle());
+  if (!qq) { main.innerHTML = `<div class="card">${empty('질문을 찾을 수 없어요')}</div>`; return; }
+  const msgs = await q(sb.from('question_msgs').select('*').eq('question_id', id).order('created_at'));
+  const people = { [uid()]: '나' };
+  main.innerHTML = `<a class="back" href="#/qna">← 질문 목록</a><div class="card"><div class="flex between wrap"><h2 style="margin:0">${esc(qq.title || '질문')}</h2>${badge(...Q_ST[qq.status])}</div>
+    ${await qThreadHTML(qq, msgs, people)}
+    ${qq.status === 'answered' || qq.status === 'resolved' || qq.status === 'confused' ? `<div class="flex wrap" style="gap:8px;margin-top:14px;justify-content:center">
+      <button class="btn ${qq.status === 'resolved' ? 'primary' : ''}" id="qok" style="font-size:16px">이해됐어요 👍</button>
+      <button class="btn ${qq.status === 'confused' ? 'primary' : ''}" id="qno" style="font-size:16px">아직 어려워요 🤔</button></div>` : '<p class="small muted" style="text-align:center">선생님 답변을 기다리는 중이에요</p>'}
+    <div style="margin-top:12px"><button class="btn sm" id="qmore">＋ 더 물어보기</button></div></div>`;
+  main.querySelector('#qok')?.addEventListener('click', async () => { await q(sb.from('questions').update({ status: 'resolved', updated_at: new Date().toISOString() }).eq('id', id)); toast('좋아요! 👍'); route(); });
+  const ask = async (status, title) => {
+    const r = await photoNoteModal({ title, desc: '어디가 어려운지 적거나 사진을 붙여 주세요.', notePh: '예: 그래도 2번 근거를 모르겠어요', needPhoto: false, folder: 'qna' });
+    if (!r) return;
+    await q(sb.from('question_msgs').insert({ question_id: id, body: r.note || null, files: r.files }));
+    await q(sb.from('questions').update({ status, updated_at: new Date().toISOString() }).eq('id', id));
+    staffNotify('q', id, r.note || '사진'); toast('선생님께 보냈어요'); route();
+  };
+  main.querySelector('#qno')?.addEventListener('click', () => ask('confused', '아직 어려워요 🤔'));
+  main.querySelector('#qmore').onclick = () => ask(qq.status === 'confused' ? 'confused' : 'open', '더 물어보기');
+}
+async function tQna(id) {
+  const main = layout('/t/qna');
+  const qs = await q(sb.from('questions').select('*').order('updated_at', { ascending: false }).limit(300));
+  const studs = await q(sb.from('profiles').select('id,full_name,class_id').in('id', [...new Set(qs.map(x => x.user_id))].concat(uid())));
+  const pm = Object.fromEntries(studs.map(s => [s.id, s]));
+  if (!id) {
+    let f = 'todo'; try { f = sessionStorage.getItem('qf') || 'todo'; } catch (e) {}
+    const groups = { todo: x => x.status === 'open' || x.status === 'confused', answered: x => x.status === 'answered', resolved: x => x.status === 'resolved', all: () => true };
+    const list = qs.filter(groups[f] || groups.todo);
+    const conf = {}; qs.filter(x => x.status === 'confused').forEach(x => { conf[x.user_id] = (conf[x.user_id] || 0) + 1; });
+    const confList = Object.entries(conf).sort((a, b) => b[1] - a[1]);
+    main.innerHTML = `<h1 class="page">질문</h1>
+      <div class="grid stats">${stat(qs.filter(groups.todo).length, '답변 필요')}${stat(qs.filter(groups.answered).length, '확인 안 함')}${stat(qs.filter(x => x.status === 'confused').length, '아직 어려워요')}</div>
+      ${confList.length ? `<div class="card"><b>🤔 '아직 어려워요'가 남은 학생</b><div class="small" style="margin-top:6px">${confList.map(([u, n]) => `${esc(pm[u]?.full_name || '')} ${n}건`).join(' · ')}</div></div>` : ''}
+      <div class="flex wrap" style="gap:6px;margin-bottom:12px">${[['todo', '답변 필요'], ['answered', '확인 안 함'], ['resolved', '해결'], ['all', '전체']].map(([k, l]) => `<button class="btn sm ${f === k ? 'primary' : ''}" data-f="${k}">${l}</button>`).join('')}</div>
+      <div class="card">${list.length ? list.map(x => `<a class="row" href="#/t/qna/${x.id}"><div class="row-main"><div class="row-title">${esc(pm[x.user_id]?.full_name || '')} · ${esc(x.title || '질문')}</div>
+        <div class="row-sub">${esc(className(pm[x.user_id]?.class_id) || '')} · ${fmtDate(x.updated_at)}</div></div>${badge(...Q_ST[x.status])}</a>`).join('') : empty('없어요 🎉')}</div>`;
+    main.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { try { sessionStorage.setItem('qf', b.dataset.f); } catch (e) {} route(); });
+    return;
+  }
+  const qq = qs.find(x => x.id === id) || await q(sb.from('questions').select('*').eq('id', id).maybeSingle());
+  if (!qq) { main.innerHTML = `<div class="card">${empty('질문을 찾을 수 없어요')}</div>`; return; }
+  const msgs = await q(sb.from('question_msgs').select('*').eq('question_id', id).order('created_at'));
+  const authors = await q(sb.from('profiles').select('id,full_name').in('id', [...new Set(msgs.map(m => m.author_id))]));
+  const people = Object.fromEntries(authors.map(a => [a.id, a.full_name]));
+  main.innerHTML = `<a class="back" href="#/t/qna">← 질문 목록</a><div class="card"><div class="flex between wrap"><h2 style="margin:0">${esc(pm[qq.user_id]?.full_name || '')} · ${esc(qq.title || '질문')}</h2>${badge(...Q_ST[qq.status])}</div>
+    ${await qThreadHTML(qq, msgs, people)}
+    <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px"><textarea id="qa" placeholder="답변을 적어 주세요" style="min-height:90px"></textarea>
+      <div class="flex wrap" style="gap:6px;margin-top:8px"><button class="btn primary" id="qsend">답변 보내기</button><button class="btn" id="qphoto">📷 사진으로 답변</button>
+      ${qq.status !== 'resolved' ? '<button class="btn" id="qclose">해결로 표시</button>' : ''}</div></div></div>`;
+  const reply = async (body, files) => {
+    await q(sb.from('question_msgs').insert({ question_id: id, body: body || null, files: files || [] }));
+    await q(sb.from('questions').update({ status: 'answered', updated_at: new Date().toISOString() }).eq('id', id));
+    sb.functions.invoke('push', { body: { action: 'send', user_ids: [qq.user_id], title: '💬 질문에 답이 달렸어요', body: (body || '사진으로 답했어요').slice(0, 100), url: `./#/qna/${id}` } });
+    toast('답변을 보냈어요'); route();
+  };
+  main.querySelector('#qsend').onclick = () => { const t = main.querySelector('#qa').value.trim(); if (!t) return toast('답변을 적어 주세요', 'err'); reply(t); };
+  main.querySelector('#qphoto').onclick = async () => { const r = await photoNoteModal({ title: '사진으로 답변', notePh: '설명 (선택)', folder: 'qna-a' }); if (r) reply(r.note, r.files); };
+  main.querySelector('#qclose')?.addEventListener('click', async () => { await q(sb.from('questions').update({ status: 'resolved', updated_at: new Date().toISOString() }).eq('id', id)); route(); });
 }
 
 boot();
