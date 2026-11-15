@@ -1,5 +1,5 @@
 // 송지희 국어 – 앱 설치용 서비스워커 (항상 최신 화면을 먼저 불러오고, 인터넷이 끊기면 저장해 둔 화면을 보여줌)
-const CACHE = 'sjh-v9';
+const CACHE = 'sjh-v10';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/logo-vertical.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).catch(() => {}));

@@ -190,6 +190,14 @@ details summary{cursor:pointer;color:var(--primary);font-size:13px}
  .stat .n{font-size:23px}
  .form-grid{grid-template-columns:1fr}
 }
+.quiz-wm{position:fixed;inset:0;pointer-events:none;z-index:30;display:flex;flex-wrap:wrap;gap:22px 34px;padding:0;transform:rotate(-24deg) scale(1.6);opacity:.08;font-weight:800;font-size:15px;color:#000;overflow:hidden;align-content:flex-start}
+.quiz-top{position:sticky;top:0;z-index:6;background:var(--bg,#fff);padding:10px 0 8px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px 10px;border-bottom:1px solid var(--line);margin-bottom:12px}
+.quiz-top .bar{flex-basis:100%;margin:4px 0 0}
+.quiz-q{position:relative}
+.quiz-opts{display:flex;flex-wrap:wrap;gap:6px}
+.quiz-opts button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 12px;font:inherit;font-size:15px;cursor:pointer;color:inherit}
+.quiz-opts button.on{background:var(--primary);border-color:var(--primary);color:#fff;font-weight:700}
+.statbtn{cursor:pointer}.statbtn:hover{outline:2px solid var(--primary);outline-offset:-2px}
 </style>
 </head>
 <body>
@@ -274,12 +282,12 @@ const pctStr = (a, b) => b ? Math.round(a / b * 100) + '%' : '-';
 const badge = (t, c = '') => `<span class="badge ${c}">${t}</span>`;
 const stat = (n, l, extra = '') => `<div class="card stat"><div class="l">${l}</div><div class="n">${n}</div>${extra}</div>`;
 const empty = t => `<div class="empty"><img src="icons/emblem.png" alt="" aria-hidden="true">${t}</div>`;
-const isLate = (a, s) => !!(a.due_at && s && new Date(s.submitted_at) > new Date(a.due_at));
+const isLate = (a, s) => !!(a.due_at && s && new Date(s.first_submitted_at || s.submitted_at) > new Date(a.due_at));
 const isTarget = (item, s) => !item.class_id || item.class_id === s.class_id;
 
 function subBadge(a, s) {
   if (s?.graded_at) return badge(`${s.score ?? '-'}점`, 'blue');
-  if (s) return isLate(a, s) ? badge('지각 제출', 'warn') : badge('제출 완료', 'ok');
+  if (s) return isLate(a, s) ? badge('늦은 제출', 'warn') : s.edited_after_due ? badge('제출 후 수정', 'warn') : badge('제출 완료', 'ok');
   if (a.due_at && new Date(a.due_at) < Date.now()) return badge('미제출', 'bad');
   return badge('미제출');
 }
@@ -817,7 +825,7 @@ async function mountPlayer(v, tracker) {
 /* =====================================================================
    학생 화면
    ===================================================================== */
-async function studentRoute([a, b]) {
+async function studentRoute([a, b, c]) {
   if (a === 't') { location.hash = '/'; return; }
   if (!a) return sHome();
   if (a === 'videos') return sVideos();
@@ -827,20 +835,27 @@ async function studentRoute([a, b]) {
   if (a === 'vocab') return b ? sVocab(b) : sVocabList();
   if (a === 'report') return sReport();
   if (a === 'qna') return sQna(b);
+  if (a === 'quiz') return sQuiz(b, c);
   location.hash = '/';
 }
 
 async function loadStudentData() {
-  const [videos, progress, assignments, subs, vtests, vres] = await Promise.all([
+  const [videos, progress, assignments0, subs, vtests, vres, ctx] = await Promise.all([
     fetchAll('videos', '*', b => b.order('created_at')),
     fetchAll('video_progress', 'id,video_id,percent,completed,last_watched_at', b => b.eq('user_id', uid())),
     fetchAll('assignments', '*', b => b.order('due_at', { ascending: true, nullsFirst: false })),
     fetchAll('submissions', '*', b => b.eq('user_id', uid())),
     fetchAll('vocab_tests', '*', b => b.lte('open_at', new Date().toISOString()).order('open_at', { ascending: false })),
-    fetchAll('vocab_results', '*', b => b.eq('user_id', uid()))
+    fetchAll('vocab_results', '*', b => b.eq('user_id', uid())),
+    myClassCtx().catch(() => ({ asg: {}, test: {}, hidden: new Set() }))
   ]);
+  // 다음 주 숙제는 이번 수업이 끝난 뒤(시작 + 3시간 30분)부터 보여요
+  const assignments = assignments0.filter(a => !ctx.hidden.has(a.id));
   return {
-    videos, assignments, vtests,
+    videos, assignments, vtests, ctx,
+    // 할 일에서 빠지는 것: 제출했거나, 선생님이 수업 기록에 검사 결과를 적은 숙제
+    asgDone: a => !!subs.find(x => x.assignment_id === a.id) || !!ctx.asg[a.id]?.st,
+    testDone: t => !!vres.find(x => x.test_id === t.id) || !!testDoneOnSite(ctx.test[t.id]),
     vm: Object.fromEntries(vres.map(r => [r.test_id, r])),
     pm: Object.fromEntries(progress.map(r => [r.video_id, r])),
     sm: Object.fromEntries(subs.map(r => [r.assignment_id, r]))
@@ -852,31 +867,42 @@ function videoRow(v, p) {
     <div class="bar"><i style="width:${pct}%"></i></div></div>
     ${p?.completed ? badge('완료', 'ok') : badge(pct + '%', pct ? 'warn' : '')}</a>`;
 }
-function assignRow(a, s, href) {
+function assignRow(a, s, href, info) {
+  const site = info?.st ? (s ? recHwBadge(info) : badge('현장 검사 완료', 'ok')) : '';
   return `<a class="row" href="${href}"><div class="row-main"><div class="row-title">${esc(a.title)}</div>
-    <div class="row-sub">${a.due_at ? `마감 ${fmtDate(a.due_at)} · ${dday(a.due_at)}` : '마감 없음'}</div></div>${subBadge(a, s)}</a>`;
+    <div class="row-sub">${a.due_at ? `마감 ${fmtDate(a.due_at)} · ${dday(a.due_at)}` : '마감 없음'}</div></div>${site || (info && s?.graded_at ? subBadge(a, { ...s, graded_at: null }) : subBadge(a, s))}</a>`;
 }
+const groupTitle = t => (t || '').replace(/\s*\(\d+\/\d+\)$/, '');
 function thumb(v, done) {
   const bg = v.source === 'youtube' ? `style="background-image:url(https://img.youtube.com/vi/${esc(v.youtube_id)}/mqdefault.jpg)"` : '';
   return `<div class="thumb" ${bg}>${v.source === 'youtube' ? '' : '▶'}${done ? `<span class="done">${badge('완료 ✓', 'ok')}</span>` : ''}</div>`;
 }
 
+function greetingFor(S, b) {
+  let G = {}; try { G = typeof S.greetings === 'string' ? JSON.parse(S.greetings) : (S.greetings || {}); } catch (e) {}
+  const kind = !b ? 'base' : b.open === 0 ? 'perfect' : b.fixed ? 'fixing' : b.open >= 3 ? 'piled' : 'base';
+  const list = (G[kind] || []).filter(Boolean).length ? G[kind].filter(Boolean) : (G.base || []).filter(Boolean).length ? G.base.filter(Boolean) : ['하이루 정신이 드나요?'];
+  const seed = [...(todayISO() + uid())].reduce((n, c) => n + c.charCodeAt(0), 0); // 같은 날엔 같은 문구
+  return list[seed % list.length].replace(/\{n\}/g, b?.open ?? 0);
+}
 async function sHome() {
   const main = layout('/');
-  const d = await loadStudentData();
+  const [d, S] = await Promise.all([loadStudentData(), loadSettings().catch(() => ({}))]);
+  state.myBook = null;
+  const book = await myBookCard(uid(), 'student').catch(() => '');
   const todoV = d.videos.filter(v => !d.pm[v.id]?.completed);
-  const todoA = d.assignments.filter(a => !d.sm[a.id]);
-  const graded = Object.values(d.sm).filter(s => s.graded_at);
-  main.innerHTML = `${installBanner()}<div id="pushbar"></div><div class="hello"><img src="icons/emblem.png" alt=""><h1 class="page" style="margin:0">${esc(state.profile.full_name)} 학생, 하이루<br>정신이 드나요?</h1></div>
-    ${await myBookCard(uid(), 'student').catch(() => '')}
+  const todoA = d.assignments.filter(a => !d.asgDone(a));
+  const graded = Object.values(d.sm).filter(s => s.graded_at && !d.ctx.asg[s.assignment_id]);
+  main.innerHTML = `${installBanner()}<div id="pushbar"></div><div class="hello"><img src="icons/emblem.png" alt=""><h1 class="page" style="margin:0">${esc(state.profile.full_name)} 학생,<br>${esc(greetingFor(S, state.myBook))}</h1></div>
+    ${book}
     <div class="grid stats">
       ${stat(`${d.videos.length - todoV.length} / ${d.videos.length}`, '완료한 영상')}
       ${stat(todoA.length, '제출할 숙제')}
       ${stat(graded.length, '채점된 숙제')}
     </div>
     <div class="card"><h2>이어서 볼 영상</h2>${todoV.length ? todoV.slice(0, 8).map(v => videoRow(v, d.pm[v.id])).join('') : empty('모든 영상을 다 봤어요! 🎉')}</div>
-    ${(() => { const tv = testTodo(d); return tv.length ? `<div class="card"><h2>이번 주 테스트</h2>${tv.map(t => vocabRow(t, null)).join('')}</div>` : ''; })()}
-    <div class="card"><h2>제출할 숙제</h2>${todoA.length ? todoA.map(a => assignRow(a, null, '#/assignment/' + a.id)).join('') : empty('제출할 숙제가 없어요! 🎉')}</div>
+    ${(() => { const tv = testTodo(d); return tv.length ? `<div class="card"><h2>이번 주 테스트</h2>${testGroups(tv, t => vocabRow(t, null))}</div>` : ''; })()}
+    <div class="card"><h2>제출할 숙제</h2>${todoA.length ? todoA.map(a => assignRow(a, null, '#/assignment/' + a.id, d.ctx.asg[a.id])).join('') : empty('제출할 숙제가 없어요! 🎉')}</div>
     ${graded.length ? `<div class="card"><h2>최근 채점 결과</h2>${graded.sort((x, y) => new Date(y.graded_at) - new Date(x.graded_at)).slice(0, 5)
       .map(s => { const a = d.assignments.find(x => x.id === s.assignment_id); return a ? assignRow(a, s, '#/assignment/' + a.id) : ''; }).join('')}</div>` : ''}`;
   fillPushBar();
@@ -885,11 +911,22 @@ async function sHome() {
 async function sVideos() {
   const main = layout('/videos');
   const d = await loadStudentData();
-  main.innerHTML = `<h1 class="page">수업 영상</h1>
-    ${d.videos.length ? `<div class="vgrid">${d.videos.map(v => { const p = d.pm[v.id], pct = p?.percent || 0;
-      return `<a class="vcard" href="#/video/${v.id}">${thumb(v, p?.completed)}<div class="body">
+  const cards = [], seen = new Set();
+  for (const v of d.videos) {
+    if (v.group_id) { if (seen.has(v.group_id)) continue; seen.add(v.group_id); }
+    const parts = v.group_id ? d.videos.filter(x => x.group_id === v.group_id).sort((a, b) => (a.part || 0) - (b.part || 0)) : [v];
+    if (parts.length < 2) { const p = d.pm[v.id], pct = p?.percent || 0;
+      cards.push(`<a class="vcard" href="#/video/${v.id}">${thumb(v, p?.completed)}<div class="body">
         <div class="row-title">${esc(v.title)}</div><div class="bar"><i style="width:${pct}%"></i></div>
-        <div class="row-sub" style="margin-top:6px">${p ? `${pct}% 시청 · ${fmtDate(p.last_watched_at)}` : '아직 안 봤어요'}</div></div></a>`; }).join('')}</div>`
+        <div class="row-sub" style="margin-top:6px">${p ? `${pct}% 시청 · ${fmtDate(p.last_watched_at)}` : '아직 안 봤어요'}</div></div></a>`); continue; }
+    const doneN = parts.filter(x => d.pm[x.id]?.completed).length, pct = Math.round(parts.reduce((n, x) => n + (d.pm[x.id]?.completed ? 100 : d.pm[x.id]?.percent || 0), 0) / parts.length);
+    const nextP = parts.find(x => !d.pm[x.id]?.completed) || parts[0];
+    cards.push(`<a class="vcard" href="#/video/${nextP.id}">${thumb(parts[0], doneN === parts.length)}<div class="body">
+      <div class="row-title">${esc(groupTitle(v.title))} <span class="small muted">· ${parts.length}개</span></div><div class="bar"><i style="width:${pct}%"></i></div>
+      <div class="row-sub" style="margin-top:6px">${parts.length}개 중 ${doneN}개 완료${doneN < parts.length ? ` · 다음: ${nextP.part}번` : ''}</div></div></a>`);
+  }
+  main.innerHTML = `<h1 class="page">수업 영상</h1>
+    ${d.videos.length ? `<div class="vgrid">${cards.join('')}</div>`
       : `<div class="card">${empty('아직 올라온 영상이 없어요')}</div>`}`;
 }
 
@@ -897,16 +934,23 @@ async function sVideo(id) {
   const main = layout('/videos');
   const v = await q(sb.from('videos').select('*').eq('id', id).maybeSingle());
   if (!v) { main.innerHTML = `<div class="card">${empty('영상을 찾을 수 없어요')}</div>`; return; }
-  const [prog, linked, subs] = await Promise.all([
+  const [prog, linked, subs, parts, partProg] = await Promise.all([
     q(sb.from('video_progress').select('*').eq('user_id', uid()).eq('video_id', id).maybeSingle()),
     q(sb.from('assignments').select('*').eq('video_id', id)),
-    q(sb.from('submissions').select('*').eq('user_id', uid()))
+    q(sb.from('submissions').select('*').eq('user_id', uid())),
+    v.group_id ? q(sb.from('videos').select('id,title,part').eq('group_id', v.group_id).order('part')) : [],
+    v.group_id ? q(sb.from('video_progress').select('video_id,percent,completed').eq('user_id', uid())) : []
   ]);
+  const partsHTML = parts.length > 1 ? `<div class="card"><h2>${esc(groupTitle(v.title))} <span class="muted small">${parts.length}개</span></h2>
+    ${parts.map(x => { const p = partProg.find(y => y.video_id === x.id), pct = p?.completed ? 100 : p?.percent || 0;
+      return `<a class="row" href="#/video/${x.id}" ${x.id === v.id ? 'style="background:#f6f5f1"' : ''}><div class="row-main"><div class="row-title">${x.id === v.id ? '▶ ' : ''}${x.part}번 영상</div>
+        <div class="bar"><i style="width:${pct}%"></i></div></div>${p?.completed ? badge('완료', 'ok') : badge(pct + '%', pct ? 'warn' : '')}</a>`; }).join('')}</div>` : '';
   main.innerHTML = `<a href="#/videos" class="back">← 영상 목록</a><h1 class="page">${esc(v.title)}</h1>
     <div class="player-wrap"><div id="player"></div></div>
     <div class="card"><div class="flex between"><b>내 진도</b><span id="pct"></span></div>
       <div class="bar big"><i id="pbar"></i></div><p class="muted small" id="pinfo" style="margin-bottom:0"></p>
       ${v.no_skip ? '<p class="muted small" style="margin:4px 0 0">🔒 이 영상은 아직 안 본 부분으로 건너뛸 수 없어요.</p>' : ''}</div>
+    ${partsHTML}
     ${v.description ? `<div class="card"><h2>설명</h2><p class="pre">${esc(v.description)}</p></div>` : ''}
     ${linked.length ? `<div class="card"><h2>이 영상의 숙제</h2>${linked.map(a => assignRow(a, subs.find(s => s.assignment_id === a.id), '#/assignment/' + a.id)).join('')}</div>` : ''}`;
   const tracker = new Tracker(v, prog);
@@ -917,17 +961,20 @@ async function sVideo(id) {
 async function sAssignments() {
   const main = layout('/assignments');
   const d = await loadStudentData();
-  const todo = d.assignments.filter(a => !d.sm[a.id]), done = d.assignments.filter(a => d.sm[a.id]);
+  const todo = d.assignments.filter(a => !d.asgDone(a)), done = d.assignments.filter(a => d.asgDone(a));
   main.innerHTML = `<h1 class="page">숙제</h1>
-    <div class="card"><h2>제출할 숙제 <span class="muted">${todo.length}</span></h2>${todo.length ? todo.map(a => assignRow(a, null, '#/assignment/' + a.id)).join('') : empty('모두 제출했어요! 🎉')}</div>
-    <div class="card"><h2>제출한 숙제 <span class="muted">${done.length}</span></h2>${done.length ? done.map(a => assignRow(a, d.sm[a.id], '#/assignment/' + a.id)).join('') : empty('아직 없어요')}</div>`;
+    <div class="card"><h2>제출할 숙제 <span class="muted">${todo.length}</span></h2>${todo.length ? todo.map(a => assignRow(a, null, '#/assignment/' + a.id, d.ctx.asg[a.id])).join('') : empty('모두 제출했어요! 🎉')}</div>
+    <div class="card"><h2>제출·검사 끝난 숙제 <span class="muted">${done.length}</span></h2>${done.length ? done.map(a => assignRow(a, d.sm[a.id], '#/assignment/' + a.id, d.ctx.asg[a.id])).join('') : empty('아직 없어요')}</div>`;
 }
 
 async function sAssignment(id) {
   const main = layout('/assignments');
   const a = await q(sb.from('assignments').select('*').eq('id', id).maybeSingle());
   if (!a) { main.innerHTML = `<div class="card">${empty('숙제를 찾을 수 없어요')}</div>`; return; }
-  const sub = await q(sb.from('submissions').select('*').eq('assignment_id', id).eq('user_id', uid()).maybeSingle());
+  const [sub, ctx] = await Promise.all([q(sb.from('submissions').select('*').eq('assignment_id', id).eq('user_id', uid()).maybeSingle()),
+    myClassCtx().catch(() => ({ asg: {}, test: {}, hidden: new Set() }))]);
+  const info = ctx.asg[id];
+  const pastDue = !!(a.due_at && new Date(a.due_at) < Date.now());
   let linkedVideo = null;
   if (a.video_id) linkedVideo = await q(sb.from('videos').select('id,title').eq('id', a.video_id).maybeSingle());
   const dueLock = !!(sub && a.lock_after_due && a.due_at && new Date(a.due_at) < Date.now());
@@ -935,18 +982,23 @@ async function sAssignment(id) {
   const existing = subFiles(sub);
   let keep = existing.slice(), added = [];
   main.innerHTML = `<a href="#/assignments" class="back">← 숙제 목록</a>
-    <div class="flex between wrap"><h1 class="page">${esc(a.title)}</h1>${subBadge(a, sub)}</div>
+    <div class="flex between wrap"><h1 class="page">${esc(a.title)}</h1>${info?.st ? recHwBadge(info) : subBadge(a, info && sub ? { ...sub, graded_at: null } : sub)}</div>
     <div class="card">
       <p class="muted small" style="margin-top:0">${a.due_at ? `마감 ${fmtDate(a.due_at)} (${dday(a.due_at)})` : '마감 없음'}</p>
       ${a.description ? `<p class="pre">${esc(a.description)}</p>` : ''}
       <div class="flex wrap" style="margin-top:14px">
         ${a.file_path ? `<button class="btn sm" id="att">📎 ${esc(a.file_name || '첨부파일')}</button>` : ''}
         ${linkedVideo ? `<a class="btn sm" href="#/video/${linkedVideo.id}">▶ ${esc(linkedVideo.title)}</a>` : ''}</div></div>
-    ${sub?.graded_at ? `<div class="card"><h2>채점 결과</h2><div class="stat"><div class="n">${esc(sub.score ?? '-')}점</div></div>
+    ${info ? `<div class="card"><h2>검사 결과</h2>${info.st ? `<p style="margin:0">${recHwBadge(info)}</p>
+        ${Array.isArray(info.rec?.[info.k + '_missing']) && info.rec[info.k + '_missing'].length ? `<p class="small" style="color:var(--bad);margin-bottom:0">안 한 것: ${esc(info.rec[info.k + '_missing'].join(', '))}</p>` : ''}`
+        : '<p class="muted small" style="margin:0">아직 검사 전이에요. 선생님이 검사하면 달성률이 여기 나와요.</p>'}</div>`
+    : sub?.graded_at ? `<div class="card"><h2>채점 결과</h2><div class="stat"><div class="n">${esc(sub.score ?? '-')}점</div></div>
         ${sub.feedback ? `<p class="pre" style="margin-top:10px">${esc(sub.feedback)}</p>` : ''}</div>` : ''}
-    <div class="card"><h2>${locked ? '내가 제출한 내용' : sub ? '제출한 숙제 (마감 전까지 수정 가능)' : '숙제 제출하기'}</h2>
+    <div class="card"><h2>${locked ? '내가 제출한 내용' : sub ? (pastDue && !a.lock_after_due ? '제출한 숙제' : '제출한 숙제 (마감 전까지 수정 가능)') : '숙제 제출하기'}</h2>
       ${dueLock && !sub.graded_at ? '<p class="small" style="color:var(--bad);margin-top:0">마감이 지나서 더 이상 고칠 수 없어요.</p>' : ''}
-      ${sub ? `<p class="muted small">제출 시간 ${fmtDate(sub.submitted_at)}${isLate(a, sub) ? ' · 지각' : ''}${sub.edit_count ? ` · 수정 ${sub.edit_count}회 (수정 기록은 선생님께 보여요)` : ''}</p>` : ''}
+      ${!locked && pastDue && !sub ? `<p class="small" style="background:var(--bad-weak);color:var(--bad);border-radius:8px;padding:8px 10px;margin-top:0"><b>마감이 지났어요.</b> 지금 내도 되지만 <b>'늦은 제출'</b>로 선생님께 보여요.</p>` : ''}
+      ${!locked && pastDue && sub ? `<p class="small" style="background:#fff6e5;border-radius:8px;padding:8px 10px;margin-top:0">마감이 지나서 지금 고치면 <b>'제출 후 수정'</b>으로 표시되고, 선생님이 다시 확인해요.</p>` : ''}
+      ${sub ? `<p class="muted small">제출 시간 ${fmtDate(sub.submitted_at)}${isLate(a, sub) ? ' · <b style="color:var(--bad)">늦은 제출</b>' : ''}${sub.edited_after_due ? ' · <b style="color:var(--bad)">제출 후 수정</b>' : ''}${sub.edit_count ? ` · 수정 ${sub.edit_count}회 (수정 기록은 선생님께 보여요)` : ''}</p>` : ''}
       <form id="f">
         <label>내용 <span class="muted">(선택)</span><textarea name="content" ${locked ? 'disabled' : ''} placeholder="답안이나 하고 싶은 말을 적어 주세요" style="min-height:80px">${esc(sub?.content || '')}</textarea></label>
         ${a.photos_needed ? '<p class="small" id="pcount" style="margin:0 0 8px"></p>' : ''}<div id="files"></div>
@@ -991,7 +1043,7 @@ async function sAssignment(id) {
   if (locked) return;
   const addFiles = list => {
     for (const file of list) {
-      if (keep.length + added.length >= 20) { toast('파일은 20개까지 올릴 수 있어요', 'err'); break; }
+      if (keep.length + added.length >= 50) { toast('파일은 50개까지 올릴 수 있어요', 'err'); break; }
       added.push({ file, url: isImg(file) ? URL.createObjectURL(file) : null });
     }
     drawFiles();
@@ -1059,17 +1111,32 @@ function weekTitle(cat = '어휘', date = new Date()) {
   return `${date.getMonth() + 1}월 ${Math.ceil((date.getDate() + first) / 7)}주차 ${cat}`;
 }
 const canEmbedPdf = () => matchMedia('(pointer:fine)').matches && !/android|iphone|ipad/i.test(UA);
-const testTodo = d => d.vtests.filter(t => !d.vm[t.id] && (t.grading === 'self' || Date.now() - new Date(t.open_at) < 7 * 864e5));
+const testTodo = d => d.vtests.filter(t => !d.testDone(t) && (t.grading === 'self' || Date.now() - new Date(t.open_at) < 7 * 864e5));
+// 같이 올린 시험지(묶음)는 한 카드로
+function testGroups(list, rowOf) {
+  const out = [], seen = new Set();
+  for (const t of list) {
+    if (!t.group_id) { out.push(rowOf(t)); continue; }
+    if (seen.has(t.group_id)) continue; seen.add(t.group_id);
+    const g = list.filter(x => x.group_id === t.group_id);
+    out.push(g.length < 2 ? rowOf(t) : `<div style="border:1px solid var(--line);border-radius:12px;padding:4px 10px;margin:8px 0">
+      <div class="small muted" style="padding-top:6px;font-weight:700">📎 같이 올린 시험지 ${g.length}개</div>${g.map(rowOf).join('')}</div>`);
+  }
+  return out.join('');
+}
+const siteTestRow = (t, info) => `<a class="row" href="#/vocab/${t.id}"><div class="row-main"><div class="row-title">${catBadge(t)}${esc(t.title)}</div>
+  <div class="row-sub">수업 시간에 본 시험이에요</div></div>${badge(info.flag === '결석' ? '결석' : '현장 응시 완료', info.flag === '결석' ? 'bad' : 'ok')}</a>`;
 
 async function sVocabList() {
   const main = layout('/vocab');
   const d = await loadStudentData();
-  const todo = d.vtests.filter(t => t.grading === 'self' && !d.vm[t.id]);
+  const todo = d.vtests.filter(t => t.grading === 'self' && !d.testDone(t));
   const cats = [...new Set(d.vtests.map(t => t.category || '테스트'))];
+  const rowOf = t => !d.vm[t.id] && testDoneOnSite(d.ctx.test[t.id]) ? siteTestRow(t, d.ctx.test[t.id]) : vocabRow(t, d.vm[t.id]);
   main.innerHTML = `<h1 class="page">테스트</h1>
-    <div class="card"><h2>지금 할 테스트 <span class="muted">${todo.length}</span></h2>${todo.length ? todo.map(t => vocabRow(t, null)).join('') : empty('지금 할 테스트가 없어요')}</div>
+    <div class="card"><h2>지금 할 테스트 <span class="muted">${todo.length}</span></h2>${todo.length ? testGroups(todo, t => vocabRow(t, null)) : empty('지금 할 테스트가 없어요')}</div>
     ${cats.map(c => { const list = d.vtests.filter(t => (t.category || '테스트') === c && !todo.includes(t));
-      return list.length ? `<div class="card"><h2>${esc(c)}</h2>${list.map(t => vocabRow(t, d.vm[t.id])).join('')}</div>` : ''; }).join('')}
+      return list.length ? `<div class="card"><h2>${esc(c)}</h2>${testGroups(list, rowOf)}</div>` : ''; }).join('')}
     <p class="center small"><a href="#/report"><b>📊 내 성적표에서 반 평균·석차 보기 →</b></a></p>`;
 }
 
@@ -1178,6 +1245,99 @@ async function sVocab(id) {
   };
 }
 
+/* =====================================================================
+   앱 재시험 (객관식 · 5분 · 화면 나가면 불통과 · 10분 뒤 재응시)
+   ===================================================================== */
+async function sQuiz(dayId, slot) {
+  const main = layout('/');
+  if (!['t1', 't2'].includes(slot)) { location.hash = '/'; return; }
+  let seen = false; try { seen = localStorage.getItem('quizIntro') === '1'; } catch (e) {}
+  const rules = [['⏱️', '<b>5분</b> 안에 풀어요. 시간이 끝나면 자동으로 제출돼요.'],
+    ['🚫', '시험 중에 <b>다른 앱이나 다른 화면으로 나가면 바로 불통과</b>예요. (카톡 확인, 홈 버튼, 화면 끄기 모두 포함)'],
+    ['🔕', '시작 전에 <b>방해 금지 모드</b>를 켜 주세요. 알림을 누르면 화면을 나간 걸로 돼요.'],
+    ['🔁', '틀린 개수만 알려 줘요. 통과 못 하면 <b>10분 뒤</b>에 다시 볼 수 있어요. 통과할 때까지 몇 번이든 돼요.'],
+    ['🪪', '화면에 내 이름이 찍혀 있어요. 캡처해서 돌리면 누가 했는지 다 보여요.']];
+  const intro = () => {
+    main.innerHTML = `<a class="back" href="#/">← 홈으로</a><h1 class="page">📝 앱 재시험</h1>
+      <div class="card">${seen ? `<p style="margin:0">5분 · 나가면 불통과 · 방해 금지 모드 켜기 · 10분 뒤 재응시</p>`
+        : `<h2>처음이니까 꼭 읽어 주세요</h2>${rules.map(([i, t]) => `<div class="flex" style="gap:10px;align-items:flex-start;margin:10px 0"><span style="font-size:22px">${i}</span><span>${t}</span></div>`).join('')}`}
+        <button class="btn primary w100" id="go" style="padding:14px;margin-top:12px">${seen ? '시작하기' : '읽었어요, 시작하기'}</button></div>`;
+    main.querySelector('#go').onclick = start;
+  };
+  const waitView = sec => {
+    const until = Date.now() + sec * 1000;
+    main.innerHTML = `<a class="back" href="#/">← 홈으로</a><h1 class="page">📝 앱 재시험</h1>
+      <div class="card center"><p style="font-size:18px;margin-top:0"><b>조금만 기다려요</b></p><p>다음 시험까지 <b id="wl" style="font-size:22px"></b></p>
+      <p class="muted small" style="margin-bottom:0">그동안 단어장을 한 번 더 보고 오세요 📖</p><button class="btn w100" id="again" style="margin-top:12px" disabled>다시 보기</button></div>`;
+    const tick = () => { const left = Math.max(0, Math.ceil((until - Date.now()) / 1000)); const el = main.querySelector('#wl'); if (!el) return clearInterval(tm);
+      el.textContent = `${Math.floor(left / 60)}분 ${left % 60}초`; if (!left) { clearInterval(tm); const b = main.querySelector('#again'); b.disabled = false; b.onclick = start; } };
+    const tm = setInterval(tick, 1000); tick(); cleanup = () => clearInterval(tm);
+  };
+  const resultView = (res, title) => {
+    const ok = res.passed;
+    main.innerHTML = `<a class="back" href="#/">← 홈으로</a><h1 class="page">${esc(title || '앱 재시험')}</h1>
+      <div class="card center">${ok ? `<div style="font-size:48px">🎉</div><h2>통과!</h2><p>틀린 개수 <b>${res.wrong}</b>개 · 수업 기록에 통과로 들어갔어요.</p>`
+        : res.status === 'left' ? `<div style="font-size:48px">🚫</div><h2>불통과</h2><p>시험 중에 화면을 나가서 불통과예요.</p>`
+        : res.status === 'timeout' ? `<div style="font-size:48px">⏱️</div><h2>불통과</h2><p>시간이 지나서 불통과예요.</p>`
+        : `<div style="font-size:48px">😢</div><h2>불통과</h2><p>틀린 개수 <b style="color:var(--bad)">${res.wrong}</b>개${res.mode !== 'score' && res.cut != null ? ` <span class="muted">(${+res.cut}개 이상 틀리면 불통과)</span>` : ''}</p>`}
+        ${ok ? '' : `<p class="muted small">10분 뒤에 다시 볼 수 있어요${res.next_at ? ` (${fmtDate(res.next_at)})` : ''}.</p>`}
+        <a class="btn w100" href="#/" style="margin-top:8px">홈으로</a></div>`;
+  };
+  const start = async () => {
+    try { localStorage.setItem('quizIntro', '1'); } catch (e) {} seen = true;
+    const { data, error } = await sb.rpc('quiz_start', { p_day: dayId, p_slot: slot });
+    if (error) { const m = /WAIT:(\d+)/.exec(error.message || ''); if (m) return waitView(+m[1]);
+      main.innerHTML = `<a class="back" href="#/">← 홈으로</a><div class="card">${empty(esc(error.message))}</div>`; return; }
+    run(data);
+  };
+  const run = data => {
+    const Q = data.questions || {}, secs = Q.sections || [], qs = Q.items || [];
+    const skew = data.now ? Date.now() - new Date(data.now).getTime() : 0, endAt = new Date(data.ends_at).getTime() + skew;
+    const ans = new Array(qs.length).fill(null);
+    let done = false;
+    const name = state.profile.full_name || '', stamp = `${name} · ${new Date().toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+    const wm = Array.from({ length: 120 }, () => `<span>${esc(stamp)}</span>`).join('');
+    main.innerHTML = `<div class="quiz" style="position:relative;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none">
+      <div class="quiz-wm" aria-hidden="true">${wm}</div>
+      <div class="quiz-top"><b>${esc(data.title)}</b><span><span id="qa">0</span>/${qs.length} · <b id="qt"></b></span><div class="bar"><i id="qb" style="width:100%"></i></div></div>
+      ${data.resumed ? '<p class="small" style="color:var(--bad)">하던 시험을 이어서 봐요. 시간은 그대로 흘러가요.</p>' : ''}
+      ${qs.map(([si, text], i) => `<div class="card quiz-q" data-q="${i}"><p style="margin-top:0"><b>${i + 1}.</b> ${esc(text)}</p>
+        <div class="quiz-opts">${(secs[si] || []).map(o => `<button type="button" data-o="${esc(o)}">${esc(o)}</button>`).join('')}</div></div>`).join('')}
+      <button class="btn primary w100" id="qsub" style="padding:14px;margin-bottom:30px">제출하기</button></div>`;
+    const box = main.querySelector('.quiz');
+    box.addEventListener('contextmenu', e => e.preventDefault());
+    box.addEventListener('copy', e => e.preventDefault());
+    box.addEventListener('click', e => {
+      const b = e.target.closest('[data-o]'); if (!b || done) return;
+      const qd = b.closest('[data-q]'), i = +qd.dataset.q;
+      ans[i] = b.dataset.o; qd.querySelectorAll('[data-o]').forEach(x => x.classList.toggle('on', x === b));
+      main.querySelector('#qa').textContent = ans.filter(x => x != null).length;
+    });
+    const finish = async (left = false, quiet = false) => {
+      if (done) return; done = true; clearInterval(tm);
+      document.removeEventListener('visibilitychange', onVis); window.removeEventListener('pagehide', onHide);
+      const { data: res, error } = await sb.rpc('quiz_submit', { p_attempt: data.attempt_id, p_answers: ans.map(x => x ?? ''), p_left: left });
+      if (error) { toast(error.message, 'err'); return; }
+      if (quiet) { if (!res.passed) toast('시험 중에 나가서 불통과 처리됐어요', 'err'); return; }
+      resultView(res, data.title);
+    };
+    const onVis = () => { if (document.visibilityState === 'hidden') finish(true); };
+    const onHide = () => finish(true);
+    document.addEventListener('visibilitychange', onVis); window.addEventListener('pagehide', onHide);
+    cleanup = () => { if (!done) return finish(true, true); };
+    main.querySelector('#qsub').onclick = () => { const n = ans.filter(x => x == null).length;
+      if (n && !confirm(`${n}문제를 아직 안 골랐어요. 그래도 낼까요?`)) return; finish(false); };
+    const tick = () => { const left = Math.max(0, Math.ceil((endAt - Date.now()) / 1000));
+      const el = main.querySelector('#qt'); if (!el) return;
+      el.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`; el.style.color = left <= 30 ? 'var(--bad)' : '';
+      if (!left) finish(false); };
+    const total = Math.max(1, (endAt - Date.now()) / 1000);
+    const tick2 = () => { tick(); const left = Math.max(0, (endAt - Date.now()) / 1000); const b = main.querySelector('#qb'); if (b) b.style.width = `${Math.min(100, left / Math.max(total, 300) * 100)}%`; };
+    const tm = setInterval(tick2, 500); tick2();
+  };
+  intro();
+}
+
 function vocabForm(t = {}, videos = [], cats = []) {
   let last = 20; try { last = +localStorage.getItem('vocabTotal') || 20; } catch (e) {}
   const cat = t.category || '어휘', grading = t.grading || 'self';
@@ -1194,7 +1354,7 @@ function vocabForm(t = {}, videos = [], cats = []) {
     <label>마감 <span class="muted">(선택)</span><input type="datetime-local" name="due_at" value="${toLocalInput(t.due_at)}"></label>
     <label>해설 영상 <span class="muted">(선택)</span><select name="video_id"><option value="">없음</option>
       ${videos.slice().reverse().map(v => `<option value="${v.id}" ${v.id === t.video_id ? 'selected' : ''}>${esc(v.title)}</option>`).join('')}</select></label>
-    <label>시험지 PDF ${t.pdf_name ? `<span class="muted">(현재: ${esc(t.pdf_name)})</span>` : '<span class="muted">(선택)</span>'}<input type="file" name="file" accept=".pdf,image/*"></label>
+    <label>시험지 PDF ${t.pdf_name ? `<span class="muted">(현재: ${esc(t.pdf_name)})</span>` : '<span class="muted">(선택 · 여러 개 고르면 한 게시글에 따로따로 결과를 받아요)</span>'}<input type="file" name="file" accept=".pdf,image/*" ${t.id ? '' : 'multiple'}></label>
     <div class="full">
       <label class="inline" data-selfonly><input type="checkbox" name="require_photo" ${t.require_photo ? 'checked' : ''}> 채점한 시험지 사진 필수</label>
       <label class="inline" data-selfonly><input type="checkbox" name="lock_after_due" ${t.lock_after_due !== false ? 'checked' : ''}> 마감 후 수정 막기</label>
@@ -1223,7 +1383,18 @@ async function saveVocab(f, existing) {
     due_at: f.due_at.value ? new Date(f.due_at.value).toISOString() : null, video_id: f.video_id.value || null,
     require_photo: f.grading.value === 'self' && f.require_photo.checked, lock_after_due: f.lock_after_due.checked, use_grade: f.use_grade.checked };
   if (row.grading === 'self') { try { localStorage.setItem('vocabTotal', row.total); } catch (e) {} }
-  const file = f.file.files[0];
+  const files = [...f.file.files];
+  if (!existing && files.length > 1) {
+    const gid = crypto.randomUUID(), rows = [];
+    for (const file of files) {
+      const path = `vocab/${crypto.randomUUID()}.${fileExt(file.name)}`;
+      await q(sb.storage.from('materials').upload(path, file, { contentType: file.type || 'application/pdf' }));
+      rows.push({ ...row, group_id: gid, pdf_path: path, pdf_name: file.name, title: `${row.title} · ${file.name.replace(/\.[^.]+$/, '')}` });
+    }
+    await q(sb.from('vocab_tests').insert(rows));
+    return;
+  }
+  const file = files[0];
   if (file) {
     row.pdf_path = `vocab/${crypto.randomUUID()}.${fileExt(file.name)}`; row.pdf_name = file.name;
     await q(sb.storage.from('materials').upload(row.pdf_path, file, { contentType: file.type || 'application/pdf' }));
@@ -1254,7 +1425,7 @@ async function tVocabList() {
     document.getElementById('tbl').innerHTML = list.length ? `<table><thead><tr><th>테스트</th><th>대상</th><th>공개</th><th>마감</th><th>결과</th><th>평균</th><th></th></tr></thead><tbody>
       ${list.map(t => { const tg = d.approved.filter(s => isTarget(t, s)), rs = tg.map(s => d.voc[key(s.id, t.id)]).filter(r => r && tRaw(t, r) != null);
         const avg = rs.length ? Math.round(rs.reduce((a, r) => a + vocabScore(t, r), 0) / rs.length) : null, future = new Date(t.open_at) > Date.now();
-        return `<tr><td>${catBadge(t)}<a href="#/t/vocab/${t.id}"><b>${esc(t.title)}</b></a><br><span class="small muted">${t.grading === 'self' ? `${t.total}문항 · 학생 입력` : `${t.total}점 만점 · 선생님 입력`}</span></td>
+        return `<tr><td>${catBadge(t)}<a href="#/t/vocab/${t.id}"><b>${esc(t.title)}</b></a>${t.group_id ? ' ' + badge('묶음', 'blue') : ''}<br><span class="small muted">${t.grading === 'self' ? `${t.total}문항 · 학생 입력` : `${t.total}점 만점 · 선생님 입력`}</span></td>
           <td>${esc(className(t.class_id) || '모든 반')}</td>
           <td class="small">${future ? badge('예약', 'blue') + '<br>' : ''}${fmtDate(t.open_at)}</td><td class="small">${t.due_at ? fmtDate(t.due_at) : '-'}</td>
           <td><button class="linkbtn" data-act="miss" data-id="${t.id}" style="font-size:14px">${rs.length} / ${tg.length}명</button></td>
@@ -1596,7 +1767,7 @@ async function teacherRoute([a, b, c, d, e, f]) {
 }
 
 async function loadTeacherData() {
-  const [profiles, videos, assignments, progress, subs, vtests, vres, plinks, pushes] = await Promise.all([
+  const [profiles, videos, assignments, progress, subs, vtests, vres, plinks, pushes, cdays] = await Promise.all([
     fetchAll('profiles', '*', b => b.order('full_name')),
     fetchAll('videos', '*', b => b.order('created_at')),
     fetchAll('assignments', '*', b => b.order('created_at')),
@@ -1605,7 +1776,8 @@ async function loadTeacherData() {
     fetchAll('vocab_tests', '*', b => b.order('open_at')),
     fetchAll('vocab_results', 'id,test_id,user_id,wrong,score,grade,percentile,submitted_at,edit_count,edited_after_due'),
     q(sb.from('parent_links').select('parent_id,student_id')),
-    fetchAll('push_subscriptions', 'id,user_id')
+    fetchAll('push_subscriptions', 'id,user_id'),
+    fetchAll('class_days', 'id,class_id,day,hw1,hw2,hw1_asg,hw2_asg')
   ]);
   state.pushUsers = new Set(pushes.map(x => x.user_id));
   const pmap = Object.fromEntries(profiles.map(p => [p.id, p]));
@@ -1619,7 +1791,9 @@ async function loadTeacherData() {
   subs.forEach(r => sub[key(r.user_id, r.assignment_id)] = r);
   const students = profiles.filter(p => p.role === 'student');
   const approved = students.filter(s => s.status === 'approved');
-  return { profiles, students, approved, videos, assignments, prog, sub, vtests, voc };
+  // 수업일 숙제는 점수 채점 X → 수업 기록에서 달성률로 검사
+  const dayAsg = classDayAsg(cdays);
+  return { profiles, students, approved, videos, assignments, prog, sub, vtests, voc, dayAsg };
 }
 
 function matrix(rows, cols, cell, act) {
@@ -1639,7 +1813,7 @@ function cellA(d, s, a) {
   if (!isTarget(a, s)) return '<span class="na">·</span>';
   const x = d.sub[key(s.id, a.id)];
   if (x?.graded_at) return `<span class="cell ok">${esc(x.score ?? '✓')}점</span>`;
-  if (x) return `<span class="cell ${isLate(a, x) ? 'warn' : 'ok'}">${isLate(a, x) ? '지각' : '제출'}</span>`;
+  if (x) return `<span class="cell ${isLate(a, x) ? 'warn' : 'ok'}">${isLate(a, x) ? '늦음' : '제출'}</span>`;
   return `<span class="cell ${a.due_at && new Date(a.due_at) < Date.now() ? 'bad' : ''}">✗</span>`;
 }
 const notDoneV = (d, v, studs) => studs.filter(s => isTarget(v, s) && !d.prog[key(s.id, v.id)]?.completed);
@@ -1661,16 +1835,18 @@ async function tDash() {
       vids.forEach(v => { if (isTarget(v, s)) { vt++; if (d.prog[key(s.id, v.id)]?.completed) vd++; } });
       asg.forEach(a => { if (isTarget(a, s)) { at++; if (d.sub[key(s.id, a.id)]) ad++; } });
     });
-    const ungraded = asg.reduce((n, a) => n + studs.filter(s => { const x = d.sub[key(s.id, a.id)]; return x && !x.graded_at; }).length, 0);
+    const waitList = asg.filter(a => !d.dayAsg[a.id]).flatMap(a => studs.filter(s => { const x = d.sub[key(s.id, a.id)]; return x && !x.graded_at; }).map(s => ({ a, s, x: d.sub[key(s.id, a.id)] })));
+    const ungraded = waitList.length;
+    const sb_ = (act, ...args) => stat(...args).replace('class="card stat"', `class="card stat statbtn" data-act="${act}" title="눌러서 자세히 보기"`);
     main.innerHTML = `<div id="pushbar"></div><div class="flex between wrap"><div class="hello" style="margin:0"><img src="icons/emblem.png" alt=""><h1 class="page" style="margin:0">대시보드</h1></div>
         <select id="cls" style="width:auto;margin-bottom:18px">${classOptions(cls, '전체 반')}</select></div>
       <div class="grid stats">
-        ${stat(pending.length + '명', '승인 대기', pending.length ? `<div class="flex" style="margin-top:8px"><button class="btn sm primary" data-act="approveAll">전체 승인</button><a class="btn sm" href="#/t/students">보기</a></div>` : '')}
+        ${sb_('stPending', pending.length + '명', '승인 대기', pending.length ? `<div class="flex" style="margin-top:8px"><button class="btn sm primary" data-act="approveAll">전체 승인</button><a class="btn sm" href="#/t/students">보기</a></div>` : '')}
         ${stat(studs.length + '명', '학생')}
-        ${stat(pctStr(vd, vt), '영상 완료율')}
-        ${stat(pctStr(ad, at), '숙제 제출률')}
-        ${stat(ungraded + '건', '채점 대기')}
-        ${stat(`${studs.filter(s => state.pushUsers.has(s.id)).length}/${studs.length}`, '알림 켠 학생', `<div class="small muted">학부모 ${d.profiles.filter(p => p.role === 'parent' && state.pushUsers.has(p.id)).length}명</div>`)}
+        ${sb_('stVideo', pctStr(vd, vt), '영상 완료율')}
+        ${sb_('stHw', pctStr(ad, at), '숙제 제출률')}
+        ${sb_('stGrade', ungraded + '건', '채점 대기')}
+        ${sb_('stPush', `${studs.filter(s => state.pushUsers.has(s.id)).length}/${studs.length}`, '알림 켠 학생', `<div class="small muted">학부모 ${d.profiles.filter(p => p.role === 'parent' && state.pushUsers.has(p.id)).length}명</div>`)}
       </div>
       ${usageCard(usage)}
       <div class="card"><div class="flex between wrap"><h2>영상 진도표</h2>
@@ -1694,6 +1870,19 @@ async function tDash() {
         toast(`${pending.length}명을 승인했어요`); route();
       }
       if (act === 'cleanup') return cleanupPhotos();
+      const listModal = (title, rows) => { const m = modal(`<h2>${title}</h2><div class="people" style="max-height:60vh">${rows.length ? rows.join('') : '<p class="muted small">없어요 🎉</p>'}</div>
+        <div class="flex" style="margin-top:10px"><button class="btn" data-close>닫기</button></div>`);
+        m.addEventListener('click', ev => { const x = ev.target.closest('[data-act]'); if (x) { m.remove(); main.onclick({ target: x }); } }); };
+      const line = (l, r, href) => `<div class="flex between" style="gap:8px;padding:8px 0;border-bottom:1px solid var(--line)"><span>${l}</span>${href ? `<a class="btn sm" href="${href}" data-close>${r}</a>` : `<span class="small muted">${r}</span>`}</div>`;
+      if (act === 'stPending') listModal(`승인 대기 ${pending.length}명`, pending.map(p => line(`<b>${esc(p.full_name || p.email)}</b> <span class="small muted">${p.role === 'parent' ? '학부모' : esc(className(p.class_id) || '반 없음')}</span>`, '학생 관리', '#/t/students')));
+      if (act === 'stGrade') listModal(`채점 대기 ${waitList.length}건`, waitList.sort((p, r) => new Date(p.x.submitted_at) - new Date(r.x.submitted_at))
+        .map(w => line(`<b>${esc(w.s.full_name)}</b> · ${esc(w.a.title)}<br><span class="small muted">${fmtDate(w.x.submitted_at)} 제출</span>`, '채점하기', '#/t/assignment/' + w.a.id)));
+      if (act === 'stVideo') listModal('영상별 시청 완료', vids.slice().reverse().map(v => { const tg = studs.filter(s => isTarget(v, s)), n = tg.filter(s => d.prog[key(s.id, v.id)]?.completed).length;
+        return `<div class="flex between" style="gap:8px;padding:8px 0;border-bottom:1px solid var(--line)"><span>${esc(v.title)}</span><button class="btn sm" data-act="missV" data-id="${v.id}">${n}/${tg.length}명 · 안 본 학생</button></div>`; }));
+      if (act === 'stHw') listModal('숙제별 제출', asg.slice().reverse().map(a => { const tg = studs.filter(s => isTarget(a, s)), n = tg.filter(s => d.sub[key(s.id, a.id)]).length;
+        return `<div class="flex between" style="gap:8px;padding:8px 0;border-bottom:1px solid var(--line)"><span>${esc(a.title)}${d.dayAsg[a.id] ? ' ' + badge('수업 기록', 'blue') : ''}</span><button class="btn sm" data-act="missA" data-id="${a.id}">${n}/${tg.length}명 · 미제출</button></div>`; }));
+      if (act === 'stPush') { const off = studs.filter(s => !state.pushUsers.has(s.id));
+        listModal(`알림 안 켠 학생 ${off.length}명`, off.map(s => line(`<b>${esc(s.full_name)}</b> <span class="small muted">${esc(className(s.class_id))}</span>`, (state.parentsByStudent[s.id] || []).some(p => state.pushUsers.has(p.id)) ? '학부모는 켬' : '학부모도 안 켬'))); }
       if (act === 'missV') { const v = d.videos.find(x => x.id === id); showPeople(`'${v.title}' 시청 미완료`, notDoneV(d, v, studs), { title: '📺 수업 영상 안내', body: `'${v.title}' 영상을 아직 다 보지 않았어요. 꼭 끝까지 봐 주세요!`, url: `./#/video/${v.id}` }); }
       if (act === 'missA') { const a = d.assignments.find(x => x.id === id); showPeople(`'${a.title}' 미제출`, notDoneA(d, a, studs), { title: '📝 숙제 안내', body: `'${a.title}' 숙제를 아직 내지 않았어요.${a.due_at ? ` (마감 ${fmtDate(a.due_at)})` : ''}`, url: `./#/assignment/${a.id}` }); }
       if (act === 'missVo') { const t = d.vtests.find(x => x.id === id); showPeople(`'${t.title}' 결과 없음`, studs.filter(s => isTarget(t, s) && !(d.voc[key(s.id, t.id)] && tRaw(t, d.voc[key(s.id, t.id)]) != null)), { title: `📚 ${t.category} 안내`, body: `'${t.title}' 결과를 아직 적지 않았어요.${t.due_at ? ` (마감 ${fmtDate(t.due_at)})` : ''}`, url: `./#/vocab/${t.id}` }); }
@@ -1703,7 +1892,7 @@ async function tDash() {
         ...studs.map(s => [s.full_name, className(s.class_id), s.email, ...vids.map(v => !isTarget(v, s) ? '' : (d.prog[key(s.id, v.id)]?.percent || 0) + '%')])]);
       if (act === 'csvA') downloadCSV('숙제제출.csv', [['이름', '반', '이메일', ...asg.map(a => a.title)],
         ...studs.map(s => [s.full_name, className(s.class_id), s.email, ...asg.map(a => { if (!isTarget(a, s)) return ''; const x = d.sub[key(s.id, a.id)];
-          return x?.graded_at ? x.score : x ? (isLate(a, x) ? '지각제출' : '제출') : '미제출'; })])]);
+          return x?.graded_at ? x.score : x ? (isLate(a, x) ? '늦은 제출' : '제출') : '미제출'; })])]);
     };
   };
   draw();
@@ -1859,13 +2048,28 @@ async function tClasses() {
       <label style="flex:1;min-width:130px;margin:0">가입 코드<input name="code" required value="${gen()}" style="text-transform:uppercase"></label>
       <button class="btn primary">만들기</button></form>
       <p class="muted small" style="margin-bottom:0">학생은 회원가입할 때 이 코드를 입력하면 해당 반으로 자동 배정돼요.</p></div>
-    <div class="card tbl-wrap">${state.classes.length ? `<table><thead><tr><th>반 이름</th><th>가입 코드</th><th>학생 수</th><th></th></tr></thead><tbody>
+    <div class="card tbl-wrap">${state.classes.length ? `<table><thead><tr><th>반 이름</th><th>가입 코드</th><th>수업 시작 <span class="small muted">(끝나고 = +3시간 30분)</span></th><th>학생 수</th><th></th></tr></thead><tbody>
       ${state.classes.map(c => { const n = profiles.filter(p => p.class_id === c.id && p.role === 'student'), w = n.filter(p => p.status === 'pending').length;
         return `<tr><td><b>${esc(c.name)}</b></td><td><span class="code">${esc(c.join_code)}</span></td>
+          <td><input type="time" data-start="${c.id}" value="${esc(startOf(c))}" style="width:auto;padding:5px 8px"><div class="small muted">${startOf(c) ? `${(() => { const [h, m] = startOf(c).split(':').map(Number), t = h * 60 + m + 210; return `${Math.floor(t / 60) % 24}:${String(t % 60).padStart(2, '0')}`; })()}부터 다음 주 숙제` : '비우면 그날 밤에'}</div></td>
           <td>${n.length}명 ${w ? badge(`대기 ${w}`, 'warn') : ''}</td>
           <td class="flex" style="justify-content:flex-end"><button class="btn sm" data-act="copy" data-id="${c.id}">가입 안내 복사</button>
             <button class="btn sm" data-act="regen" data-id="${c.id}">코드 바꾸기</button><button class="btn sm" data-act="rename" data-id="${c.id}">이름 변경</button>
-            ${isHead() ? `<button class="btn sm danger" data-act="del" data-id="${c.id}">삭제</button>` : ''}</td></tr>`; }).join('')}</tbody></table>` : empty('아직 반이 없어요. 위에서 만들어 주세요.')}</div>`;
+            ${isHead() ? `<button class="btn sm danger" data-act="del" data-id="${c.id}">삭제</button>` : ''}</td></tr>`; }).join('')}</tbody></table>` : empty('아직 반이 없어요. 위에서 만들어 주세요.')}</div>
+    <div class="card" id="greet"><h2>학생 인사 문구 <span class="small muted">학생 홈 맨 위에 나와요 · 한 줄에 하나씩 · 여러 줄이면 날마다 바뀌어요</span></h2>
+      <p class="small muted" style="margin-top:0">{n} 은 밀린 개수로 바뀌어요. 이름은 앞에 자동으로 붙어요 (예: 김주하 학생, …)</p>
+      <div class="form-grid">${[['perfect', '🌟 밀린 것 0개'], ['fixing', '💪 최근 7일 안에 해결했는데 아직 남음'], ['piled', '😵 3개 이상 쌓임'], ['base', '🙂 그 밖에']].map(([k, l]) =>
+        `<label>${l}<textarea data-g="${k}" style="min-height:70px"></textarea></label>`).join('')}</div>
+      <button class="btn primary" id="gsave">문구 저장</button></div>`;
+  loadSettings().then(S => { let G = {}; try { G = JSON.parse(S.greetings || '{}'); } catch (e) {}
+    main.querySelectorAll('[data-g]').forEach(t => { t.value = (G[t.dataset.g] || []).join('\n'); }); }).catch(() => {});
+  main.querySelector('#gsave').onclick = async e => { const G = {};
+    main.querySelectorAll('[data-g]').forEach(t => { G[t.dataset.g] = t.value.split('\n').map(x => x.trim()).filter(Boolean); });
+    busy(e.currentTarget, true);
+    try { await q(sb.from('app_settings').upsert({ key: 'greetings', value: JSON.stringify(G) }, { onConflict: 'key' })); toast('인사 문구를 저장했어요'); } finally { busy(e.currentTarget, false); } };
+  main.addEventListener('change', async e => { const el = e.target.closest('[data-start]'); if (!el) return;
+    await q(sb.from('classes').update({ start_time: el.value || null }).eq('id', el.dataset.start));
+    const c = state.classes.find(x => x.id === el.dataset.start); if (c) c.start_time = el.value || null; toast('수업 시작 시간을 저장했어요'); route(); });
   const f = document.getElementById('f');
   f.onsubmit = async e => {
     e.preventDefault();
@@ -1912,12 +2116,12 @@ async function tVideos() {
       <form id="f" style="margin-top:16px">${videoForm()}
         <div style="margin-bottom:12px"><label class="inline"><input type="radio" name="source" value="youtube" checked> 유튜브 링크</label>
           <label class="inline"><input type="radio" name="source" value="file"> 영상 파일 업로드</label></div>
-        <label id="yt">유튜브 주소 <span class="muted">('일부 공개'로 올린 영상 추천)</span><input name="url" placeholder="https://youtu.be/..."></label>
+        <label id="yt">유튜브 주소 <span class="muted">('일부 공개' 추천 · 여러 개면 한 줄에 하나씩 → 한 게시글에 파트로 묶여요)</span><textarea name="url" style="min-height:70px" placeholder="https://youtu.be/...&#10;https://youtu.be/..."></textarea></label>
         <label id="fl" style="display:none">영상 파일 <span class="muted">(Supabase 무료 요금제는 파일당 50MB까지)</span><input type="file" name="file" accept="video/*"></label>
         <button class="btn primary">올리기</button></form></details></div>
     <div class="card tbl-wrap">${d.videos.length ? `<table><thead><tr><th>제목</th><th>대상</th><th>형식</th><th>완료 학생</th><th>공개</th><th></th></tr></thead><tbody>
       ${d.videos.slice().reverse().map(v => { const t = d.approved.filter(s => isTarget(v, s)), done = t.filter(s => d.prog[key(s.id, v.id)]?.completed).length;
-        return `<tr><td><a href="#/t/video/${v.id}"><b>${esc(v.title)}</b></a>${v.no_skip ? ' 🔒' : ''}</td><td>${esc(className(v.class_id) || '모든 반')}</td>
+        return `<tr><td><a href="#/t/video/${v.id}"><b>${esc(v.title)}</b></a>${v.no_skip ? ' 🔒' : ''}${v.group_id ? ' ' + badge('묶음', 'blue') : ''}</td><td>${esc(className(v.class_id) || '모든 반')}</td>
           <td>${v.source === 'youtube' ? '유튜브' : '파일'}</td>
           <td><button class="linkbtn" data-act="miss" data-id="${v.id}" style="font-size:14px">${done} / ${t.length}명</button></td>
           <td><input type="checkbox" data-act="pub" data-id="${v.id}" ${v.published ? 'checked' : ''}></td>
@@ -1934,8 +2138,16 @@ async function tVideos() {
                   published: f.published.checked, no_skip: f.no_skip.checked, source: f.source.value };
     const btn = f.querySelector('button.primary');
     if (row.source === 'youtube') {
-      row.youtube_id = ytId(f.url.value);
-      if (!row.youtube_id) return toast('유튜브 주소를 확인해 주세요', 'err');
+      const lines = f.url.value.split(/\s+/).map(x => x.trim()).filter(Boolean), ids = lines.map(ytId);
+      if (!ids.length || ids.some(x => !x)) return toast(`유튜브 주소를 확인해 주세요${ids.length > 1 ? ` (${ids.findIndex(x => !x) + 1}번째 줄)` : ''}`, 'err');
+      if (ids.length > 1) {
+        const gid = crypto.randomUUID();
+        busy(btn, true);
+        try { await q(sb.from('videos').insert(ids.map((id, i) => ({ ...row, youtube_id: id, group_id: gid, part: i + 1, title: `${row.title} (${i + 1}/${ids.length})` }))));
+          toast(`영상 ${ids.length}개를 한 게시글로 올렸어요`); route(); } catch (err) { busy(btn, false); }
+        return;
+      }
+      row.youtube_id = ids[0];
     } else {
       const file = f.file.files[0];
       if (!file) return toast('영상 파일을 골라 주세요', 'err');
@@ -2023,11 +2235,11 @@ async function tAssignments() {
       <form id="f" style="margin-top:16px">${assignForm({}, d.videos)}<button class="btn primary">숙제 내기</button></form></details></div>
     <div class="card tbl-wrap">${d.assignments.length ? `<table><thead><tr><th>제목</th><th>대상</th><th>마감</th><th>제출</th><th>채점 대기</th><th></th></tr></thead><tbody>
       ${d.assignments.slice().reverse().map(a => { const t = d.approved.filter(s => isTarget(a, s)), subs = t.map(s => d.sub[key(s.id, a.id)]).filter(Boolean);
-        const wait = subs.filter(x => !x.graded_at).length;
-        return `<tr><td><a href="#/t/assignment/${a.id}"><b>${esc(a.title)}</b></a></td><td>${esc(className(a.class_id) || '모든 반')}</td>
+        const wait = d.dayAsg[a.id] ? 0 : subs.filter(x => !x.graded_at).length;
+        return `<tr><td><a href="#/t/assignment/${a.id}"><b>${esc(a.title)}</b></a>${d.dayAsg[a.id] ? ' ' + badge('수업 기록', 'blue') : ''}</td><td>${esc(className(a.class_id) || '모든 반')}</td>
           <td class="small">${a.due_at ? fmtDate(a.due_at) + '<br>' + badge(dday(a.due_at), new Date(a.due_at) < Date.now() ? '' : 'blue') : '-'}</td>
           <td><button class="linkbtn" data-act="miss" data-id="${a.id}" style="font-size:14px">${subs.length} / ${t.length}명</button></td>
-          <td>${wait ? badge(wait + '건', 'warn') : '-'}</td>
+          <td>${d.dayAsg[a.id] ? '<span class="small muted">달성률</span>' : wait ? badge(wait + '건', 'warn') : '-'}</td>
           <td><button class="btn sm danger" data-act="del" data-id="${a.id}">삭제</button></td></tr>`; }).join('')}</tbody></table>` : empty('아직 숙제가 없어요')}</div>`;
   const f = document.getElementById('f');
   f.onsubmit = async e => {
@@ -2058,26 +2270,29 @@ async function tAssignment(id) {
       ? `<img class="thumb-s" data-p="${esc(f.path)}" data-sub="${x.id}" data-i="${n++}" alt="" title="${esc(f.name)}">`
       : `<button class="btn sm" data-file="${esc(f.path)}">📎 ${esc(trunc(f.name, 14))}</button>`).join('')}</div>` : ''; };
   const sm = Object.fromEntries(subs.map(s => [s.user_id, s]));
+  const link = d.dayAsg[a.id], checkHref = link ? `#/t/records/${link.d.class_id}/check/${link.d.id}/${link.k}` : '';
   const rows = d.approved.filter(s => isTarget(a, s)).map(s => ({ s, x: sm[s.id] }))
     .sort((p, r) => (!!r.x - !!p.x) || ((p.x?.graded_at ? 1 : 0) - (r.x?.graded_at ? 1 : 0)));
   main.innerHTML = `<a href="#/t/assignments" class="back">← 숙제 목록</a><h1 class="page">${esc(a.title)}</h1>
-    <div class="grid stats">${stat(`${subs.length} / ${rows.length}`, '제출')}${stat(subs.filter(x => !x.graded_at).length + '건', '채점 대기')}
+    ${link ? `<div class="card" style="border:2px solid var(--primary)"><b>수업 기록 숙제예요.</b> 점수 대신 <b>달성률</b>로 검사해요.
+      <a class="btn primary sm" href="${checkHref}" style="margin-left:8px">✓ 수업 기록에서 검사하기</a></div>` : ''}
+    <div class="grid stats">${stat(`${subs.length} / ${rows.length}`, '제출')}${link ? stat(subs.filter(x => x.edited_after_due).length + '명', '제출 후 수정') : stat(subs.filter(x => !x.graded_at).length + '건', '채점 대기')}
       ${stat(a.due_at ? dday(a.due_at) : '없음', '마감')}</div>
     <div class="card"><div class="flex between wrap"><h2>제출 현황 · 채점</h2>
       <div class="flex"><button class="btn sm" id="miss">미제출 학생 목록</button><button class="btn sm" id="csv">엑셀로 받기</button></div></div>
-      ${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>이름</th><th>상태</th><th>제출 내용</th><th style="width:90px">점수</th><th>피드백</th><th></th></tr></thead><tbody>
+      ${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>이름</th><th>상태</th><th>제출 내용</th>${link ? '<th></th>' : '<th style="width:90px">점수</th><th>피드백</th><th></th>'}</tr></thead><tbody>
       ${rows.map(({ s, x }) => `<tr data-row="${s.id}"><td><a href="#/t/student/${s.id}">${esc(s.full_name)}</a><br><span class="small muted">${esc(className(s.class_id))}</span></td>
         <td>${subBadge(a, x)}${x ? `<br><span class="small muted">${fmtDate(x.submitted_at)}</span>${editBadges(x)}` : ''}</td>
         <td style="max-width:320px">${x ? `${x.content ? `<details><summary>${esc(trunc(x.content, 30))}</summary><p class="pre small">${esc(x.content)}</p></details>` : ''}
           ${filesCell(x)}` : '<span class="muted">-</span>'}</td>
-        <td>${x ? `<input type="number" step="any" data-score value="${esc(x.score ?? '')}" style="padding:6px">` : ''}</td>
+        ${link ? `<td>${x ? `<a class="btn sm" href="${checkHref}">검사하기</a>` : ''}</td>` : `<td>${x ? `<input type="number" step="any" data-score value="${esc(x.score ?? '')}" style="padding:6px">` : ''}</td>
         <td>${x ? `<input data-fb value="${esc(x.feedback || '')}" placeholder="한 줄 피드백" style="padding:6px">` : ''}</td>
-        <td>${x ? `<button class="btn sm primary" data-grade="${x.id}">${x.graded_at ? '수정' : '채점'}</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : empty('대상 학생이 없어요')}</div>
+        <td>${x ? `<button class="btn sm primary" data-grade="${x.id}">${x.graded_at ? '수정' : '채점'}</button>` : ''}</td>`}</tr>`).join('')}</tbody></table></div>` : empty('대상 학생이 없어요')}</div>
     <div class="card"><h2>숙제 수정</h2><form id="f">${assignForm(a, d.videos)}
       ${a.file_path ? `<p class="small"><a href="#" id="att">📎 현재 첨부파일 보기</a></p>` : ''}<button class="btn primary">저장</button></form></div>`;
   document.getElementById('miss').onclick = () => showPeople(`'${a.title}' 미제출`, rows.filter(r => !r.x).map(r => r.s));
   document.getElementById('csv').onclick = () => downloadCSV(`${a.title}_제출현황.csv`, [['이름', '반', '상태', '처음 제출', '마지막 제출', '수정 횟수', '마감 후 수정', '내용', '사진·파일 수', '점수', '피드백'],
-    ...rows.map(({ s, x }) => [s.full_name, className(s.class_id), x ? (isLate(a, x) ? '지각제출' : '제출') : '미제출', x ? fmtDate(x.first_submitted_at) : '', x ? fmtDate(x.submitted_at) : '', x?.edit_count || '', x?.edited_after_due ? 'O' : '', x?.content, x ? subFiles(x).length : '', x?.score, x?.feedback])]);
+    ...rows.map(({ s, x }) => [s.full_name, className(s.class_id), x ? (isLate(a, x) ? '늦은 제출' : '제출') : '미제출', x ? fmtDate(x.first_submitted_at) : '', x ? fmtDate(x.submitted_at) : '', x?.edit_count || '', x?.edited_after_due ? 'O' : '', x?.content, x ? subFiles(x).length : '', x?.score, x?.feedback])]);
   document.getElementById('att')?.addEventListener('click', e => { e.preventDefault(); openFile('materials', a.file_path); });
   main.addEventListener('click', async e => {
     const fb = e.target.closest('[data-file]'); if (fb) return openFile('submissions', fb.dataset.file);
@@ -2137,8 +2352,8 @@ const REC = (() => {
   function items(day, rec, S) {
     const out = [], hwCut = +S.hw_cut || 70, defCut = +S.default_cut || 4;
     if (!rec) return out;
-    const hws = [['hw1', day.hw1_sms || day.hw1, rec.hw1, rec.hw1_done, rec.rate], ['hw2', day.hw2, rec.hw2, rec.hw2_done, rec.hw2_rate]];
-    for (const [k, name, st, done, rate] of hws) {
+    const hws = [['hw1', day.hw1_sms || day.hw1, rec.hw1, rec.hw1_done, rec.rate, rec.hw1_late], ['hw2', day.hw2, rec.hw2, rec.hw2_done, rec.hw2_rate, rec.hw2_late]];
+    for (const [k, name, st, done, rate, late] of hws) {
       if (!name) continue;
       const j = hwJudge(st, rate, hwCut);
       if (!j) continue;
@@ -2149,7 +2364,8 @@ const REC = (() => {
       else if (j === 'poor') text = `미흡${num(rate) != null ? `(${(+rate).toFixed(1)}%)` : ''} → ${done ? '보완 완료' : '보완 필요'}`;
       else if (j === 'wrong') text = `잘못 제출 → ${done ? '이후 제출 완료' : '원래 숙제 제출 필요'}`;
       else text = `${st === '결석' ? '결석' : '미제출'} → ${done ? '이후 제출 완료' : '제출 필요'}`;
-      out.push({ key: k, kind: 'hw', name, j, bad, done: done || null, line: `· 숙제(${name}): ${text}`,
+      if (late && j !== 'missing') text = `늦은 제출 · ${text}`;
+      out.push({ key: k, kind: 'hw', name, j, bad, late: !!late, done: done || null, line: `· 숙제(${name}): ${text}`,
         todo: j === 'poor' ? `${name} 보완` : `${name} 제출`, short: j === 'poor' ? '미흡' : j === 'wrong' ? '잘못 제출' : j === 'missing' ? '미제출' : j === 'perfect' ? '완벽' : '제출' });
     }
     for (const t of ['t1', 't2']) {
@@ -2248,6 +2464,41 @@ const REC = (() => {
 const todayISO = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
 const MODES = [['wrong', '틀린 개수'], ['score', '점수'], ['take', '응시만'], ['record', '기록만(판정 없음)']];
 const J_CLS = { ok: 'ok', perfect: 'ok', pass: 'ok', record: 'blue', poor: 'warn', wrong: 'warn', missing: 'bad', fail: 'bad', absent: 'bad' };
+// 수업이 끝난 걸로 보는 시각 = 시작 + 3시간 30분 (그 전엔 그날 결과·다음 주 숙제를 학생에게 안 보여 줘요)
+const startOf = cls => (cls?.start_time || '').slice(0, 5);
+const dayOverAt = (d, cls) => d.day ? new Date(`${d.day}T${startOf(cls) || '23:59'}:00+09:00`).getTime() + 210 * 60000 : 0;
+const dayOver = (d, cls) => !d.day || Date.now() >= dayOverAt(d, cls);
+const dueFromStart = (day, cls) => day && startOf(cls) ? new Date(`${day}T${startOf(cls)}:00+09:00`).toISOString() : null;
+// 수업일에 붙은 숙제 (현장 검사 · 달성률로 보는 숙제)
+const classDayAsg = days => { const m = {}; (days || []).forEach(d => ['hw1', 'hw2'].forEach(k => { if (d[k + '_asg']) m[d[k + '_asg']] = { d, k }; })); return m; };
+// 학생: 내 반 수업일 · 기록 정보
+async function myClassCtx() {
+  const ctx = { asg: {}, test: {}, hidden: new Set() };
+  const ro = await q(sb.from('roster').select('*').eq('profile_id', uid())).catch(() => []);
+  if (!ro.length) return ctx;
+  const r = ro[0], cls = state.classes.find(c => c.id === r.class_id);
+  const [days, recs] = await Promise.all([q(sb.from('class_days').select('*').eq('class_id', r.class_id).order('day')), q(sb.from('class_records').select('*').eq('roster_id', r.id))]);
+  const rm = Object.fromEntries(recs.map(x => [x.day_id, x]));
+  const dated = days.filter(d => d.day).sort((a, b) => a.day.localeCompare(b.day));
+  for (const d of days) {
+    const i = dated.indexOf(d), prev = i > 0 ? dated[i - 1] : null, rec = rm[d.id];
+    for (const k of ['hw1', 'hw2']) if (d[k + '_asg']) {
+      ctx.asg[d[k + '_asg']] = { d, k, rec, st: rec?.[k] || null, rate: rec ? rec[k === 'hw1' ? 'rate' : 'hw2_rate'] : null };
+      if (prev && !dayOver(prev, cls)) ctx.hidden.add(d[k + '_asg']);
+    }
+    for (const t of ['t1', 't2']) if (d[t + '_test']) ctx.test[d[t + '_test']] = { d, t, rec, val: rec?.[t], flag: rec?.[t + '_flag'] };
+  }
+  Object.assign(ctx, { r, cls, days, rm });
+  return ctx;
+}
+// 선생님이 수업 기록에 적은 검사 결과 배지
+function recHwBadge(info) {
+  if (!info?.st) return '';
+  const j = REC.hwJudge(info.st, info.rate, 70);
+  const txt = ['ok', 'perfect'].includes(j) ? `검사 완료${info.rate != null ? ` · ${(+info.rate).toFixed(0)}%` : ''}` : info.st + (info.rate != null ? ` · ${(+info.rate).toFixed(0)}%` : '');
+  return badge(esc(txt), J_CLS[j] || 'ok');
+}
+const testDoneOnSite = info => info && (info.val != null || info.flag);
 function smsHref(phone, body) {
   const n = String(phone || '').replace(/[^0-9+]/g, '');
   return isIOS ? `sms:${n}&body=${encodeURIComponent(body)}` : `sms:${n}?body=${encodeURIComponent(body)}`;
@@ -2265,7 +2516,7 @@ async function loadClassBook(classId) {
   const rm = {}; recs.forEach(r => { rm[r.day_id + '|' + r.roster_id] = r; });
   const asgIds = days.flatMap(d => [d.hw1_asg, d.hw2_asg]).filter(Boolean);
   const subs = {};
-  if (asgIds.length) (await fetchAll('submissions', 'id,assignment_id,user_id,files,submitted_at,edit_count,edited_after_due', b => b.in('assignment_id', asgIds)))
+  if (asgIds.length) (await fetchAll('submissions', 'id,assignment_id,user_id,files,submitted_at,first_submitted_at,edit_count,edited_after_due,history', b => b.in('assignment_id', asgIds)))
     .forEach(x => { subs[x.assignment_id + '|' + x.user_id] = x; });
   const rosterById = Object.fromEntries(roster.map(r => [r.id, r]));
   const prog = {};
@@ -2285,10 +2536,13 @@ function autoHw(d, k, rec, sub, r) {
   if (d.hw_due && new Date(d.hw_due) < Date.now()) return '미제출';
   return null;
 }
+// 마감 뒤에 처음 낸 숙제 = 늦은 제출 (달성률은 그대로 인정, 문자에만 표시)
+const lateSub = (d, sub) => !!(sub && d.hw_due && new Date(sub.first_submitted_at || sub.submitted_at) > new Date(d.hw_due));
 function effRec(d, rec, subOf, r) {
   const a1 = autoHw(d, 'hw1', rec, subOf('hw1'), r), a2 = autoHw(d, 'hw2', rec, subOf('hw2'), r);
-  if (!a1 && !a2) return rec || null;
-  return { ...(rec || {}), ...(a1 ? { hw1: a1 } : {}), ...(a2 ? { hw2: a2 } : {}) };
+  const l1 = lateSub(d, subOf('hw1')), l2 = lateSub(d, subOf('hw2'));
+  if (!a1 && !a2 && !l1 && !l2) return rec || null;
+  return { ...(rec || {}), ...(a1 ? { hw1: a1 } : {}), ...(a2 ? { hw2: a2 } : {}), ...(l1 ? { hw1_late: true } : {}), ...(l2 ? { hw2_late: true } : {}) };
 }
 const UNITS = [['num', '문제 번호'], ['page', '쪽수'], ['name', '지문 이름']];
 const unitWord = u => u === 'page' ? '쪽' : u === 'name' ? '지문' : '문제';
@@ -2392,7 +2646,7 @@ function recDays(main, head, cls, B) {
     if (!day && !label) return toast('날짜나 이름을 넣어 주세요', 'err');
     if (day && B.days.find(d => d.day === day)) return toast('이미 있는 날짜예요', 'err');
     const base = day ? (dated[0] || {}) : {};
-    const row = { class_id: cls.id, day, label };
+    const row = { class_id: cls.id, day, label, hw_due: dueFromStart(day, cls) };
     ['hw1', 'hw1_sms', 'hw2', 'hw1_unit', 'hw1_items', 'hw1_photos', 'hw2_unit', 'hw2_items', 'hw2_photos', 't1_name', 't1_mode', 't1_cut', 't2_name', 't2_mode', 't2_cut'].forEach(k => { if (base[k] != null) row[k] = base[k]; });
     ['hw1', 'hw1_sms', 'hw2'].forEach(k => { if (row[k]) row[k] = bump(row[k]); });
     const tCount = ['t1_name', 't2_name'].filter(k => /\d+\s*회/.test(row[k] || '')).length;
@@ -2418,7 +2672,7 @@ function recDay(main, head, cls, B, dayId) {
   const judgeCell = r => { const its = REC.items(d, B.eff(d, r), B.S);
     return its.length ? its.map(x => badge(esc(x.short) + (x.bad && x.done ? ' ✓' : ''), x.bad && x.done ? 'ok' : J_CLS[x.j] || '')).join(' ') : '<span class="na">-</span>'; };
   const photoCell = (r, k) => { if (!d[k + '_asg']) return ''; const sb_ = B.sub(d, k, r), n = sb_ ? subFiles(sb_).length : 0, need = d[k + '_photos'];
-    return `<div class="small ${n && (!need || n >= need) ? '' : 'muted'}" style="margin-top:3px">사진 ${n}${need ? '/' + need : ''}장${sb_?.edited_after_due ? ' · 마감 후 수정' : ''}</div>`; };
+    return `<div class="small ${n && (!need || n >= need) ? '' : 'muted'}" style="margin-top:3px">사진 ${n}${need ? '/' + need : ''}장${lateSub(d, sb_) ? ' · 늦은 제출' : ''}${sb_?.edited_after_due ? ' · 마감 후 수정' : ''}</div>`; };
   const hwCols = (r, x, k) => `<td><select data-k="${k}">${hwOpts(x[k], B.auto(d, k, r))}</select>${photoCell(r, k)}</td>
     <td><input data-k="${k === 'hw1' ? 'rate' : 'hw2_rate'}" type="number" step="0.1" min="0" max="100" style="width:72px" value="${(k === 'hw1' ? x.rate : x.hw2_rate) ?? ''}"></td>
     <td><input data-k="${k}_done" type="date" style="width:130px" value="${x[k + '_done'] || ''}"></td>`;
@@ -2442,7 +2696,7 @@ function recDay(main, head, cls, B, dayId) {
     ${field(k + '_items', '검사 범위', d[k + '_items'], 'placeholder="18-45 / 111-120 / 훈민가, 어부사시사"')}
     <label class="flex" style="gap:8px;align-items:center;margin-top:4px"><input type="checkbox" name="${k}_photo" style="width:auto" ${d[k + '_asg'] || (wantPhoto && d[k]) ? 'checked' : ''}> 학생이 사진으로 제출</label>
     ${field(k + '_photos', '필요한 사진 장수 (쪽수 검사면 비워도 자동)', d[k + '_photos'], 'type="number" min="1"')}`;
-  const localDT = iso => { if (!iso) return d.day ? `${d.day}T12:00` : ''; const x = new Date(iso); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 16); };
+  const localDT = iso => { if (!iso) return d.day ? `${d.day}T${startOf(cls) || '12:00'}` : ''; const x = new Date(iso); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 16); };
   const fresh = !B.recs.some(x => x.day_id === d.id);
   const checkBtns = ['hw1', 'hw2'].filter(k => d[k]).map(k => `<a class="btn sm ${k === 'hw1' ? 'primary' : ''}" href="#/t/records/${cls.id}/check/${d.id}/${k}">✓ ${esc(trunc(d[k === 'hw1' ? 'hw1_sms' : 'hw2'] || d[k], 12))} 검사하기</a>`).join('');
   main.innerHTML = head + `<a class="back" href="#/t/records/${cls.id}">← 수업일 목록</a>
@@ -2468,6 +2722,8 @@ function recDay(main, head, cls, B, dayId) {
         ${field('t2_cut', '테스트2 기준', d.t2_cut, 'type="number" step="any"')}<span></span>
         <label>테스트1 결과 가져오기 <span class="muted">(테스트 메뉴에서)</span><select name="t1_test" data-cur="${d.t1_test || ''}"><option value="">(직접 입력)</option></select></label>
         <label>테스트2 결과 가져오기<select name="t2_test" data-cur="${d.t2_test || ''}"><option value="">(직접 입력)</option></select></label>
+        <label>테스트1 앱 재시험 <span class="muted">(불통과·미응시 학생이 앱에서 객관식으로)</span><select name="t1_quiz" data-cur="${d.t1_quiz || ''}"><option value="">(없음)</option></select></label>
+        <label>테스트2 앱 재시험<select name="t2_quiz" data-cur="${d.t2_quiz || ''}"><option value="">(없음)</option></select></label>
         <label class="full">공통 안내문 <span class="muted">(주간 문자 맨 아래에 붙어요. 선택)</span><textarea name="notice" style="min-height:90px">${esc(d.notice || '')}</textarea></label>
         <div class="full flex between"><button class="btn primary">설정 저장</button>${isHead() ? '<button type="button" class="btn danger" id="ddel">이 수업일 삭제</button>' : ''}</div>
       </form></details></div>
@@ -2479,7 +2735,22 @@ function recDay(main, head, cls, B, dayId) {
       <div class="mx-wrap"><table class="mx"><thead><tr><th class="sticky">이름</th>
         ${d.hw1 ? `<th>${esc(trunc(d.hw1_sms || d.hw1, 14))}</th><th>달성률%</th><th>해결일</th>` : ''}${hasHw2 ? `<th>${esc(trunc(d.hw2, 14))}</th><th>달성률%</th><th>해결일</th>` : ''}
         ${T.map(t => `<th>${esc(d[t + '_name'])}</th><th>통과일</th>`).join('')}<th>판정</th><th>메모</th><th></th></tr></thead>
-        <tbody>${people.map(rowHTML).join('')}</tbody></table></div></div>`;
+        <tbody>${people.map(rowHTML).join('')}</tbody></table></div></div>
+    ${d.t1_quiz || d.t2_quiz ? '<div class="card" id="qatt"><h2>앱 재시험 기록</h2><p class="muted small">불러오는 중…</p></div>' : ''}`;
+
+  // 앱 재시험 기록
+  if (d.t1_quiz || d.t2_quiz) q(sb.from('quiz_attempts').select('*').eq('day_id', d.id).order('started_at')).then(at => {
+    const box = main.querySelector('#qatt'); if (!box) return;
+    const slots = ['t1', 't2'].filter(t => d[t + '_quiz']);
+    const ST = { done: '제출', left: '화면 이탈', timeout: '시간 초과', running: '푸는 중' };
+    const rows = B.roster.map(r => ({ r, by: Object.fromEntries(slots.map(t => [t, at.filter(x => x.roster_id === r.id && x.slot === t)])) })).filter(x => slots.some(t => x.by[t].length));
+    box.innerHTML = `<h2>앱 재시험 기록 <span class="small muted">5분 · 틀린 개수만 보여 줘요 · 10분 뒤 재응시</span></h2>${rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>이름</th>${slots.map(t => `<th>${esc(d[t + '_name'])}</th>`).join('')}</tr></thead><tbody>
+      ${rows.map(({ r, by }) => `<tr><td><b>${esc(r.name)}</b></td>${slots.map(t => { const L = by[t]; if (!L.length) return '<td><span class="na">-</span></td>';
+        const pass = L.find(x => x.passed), left = L.filter(x => x.status === 'left').length;
+        return `<td class="small" style="white-space:normal;min-width:170px">${pass ? badge('통과 ✓', 'ok') : badge('아직', 'warn')} ${L.length}번 응시${left ? ` · <b style="color:var(--bad)">이탈 ${left}</b>` : ''}
+          <div class="muted">${L.map(x => x.status === 'running' ? '푸는 중' : x.status === 'done' ? `-${x.wrong}` : ST[x.status]).join(' → ')}</div>
+          <div class="muted">마지막 ${fmtDate(L[L.length - 1].submitted_at || L[L.length - 1].started_at)}</div></td>`; }).join('')}</tr>`).join('')}</tbody></table></div>` : empty('아직 앱으로 재시험 본 학생이 없어요')}`;
+  }).catch(() => {});
 
   // 수업 진도 (자동 저장)
   const pc = main.querySelector('#prog');
@@ -2491,10 +2762,11 @@ function recDay(main, head, cls, B, dayId) {
 
   // 자주 쓰는 숙제
   const f = main.querySelector('#df');
-  Promise.all([q(sb.from('videos').select('id,title,class_id').order('created_at', { ascending: false })), q(sb.from('vocab_tests').select('id,title,class_id,open_at').order('open_at', { ascending: false }).limit(200))]).then(([vs, ts]) => {
+  Promise.all([q(sb.from('videos').select('id,title,class_id').order('created_at', { ascending: false })), q(sb.from('vocab_tests').select('id,title,class_id,open_at').order('open_at', { ascending: false }).limit(200)),
+    q(sb.from('quizzes').select('id,title').order('title'))]).then(([vs, ts, qz]) => {
     const mine = x => !x.class_id || x.class_id === cls.id;
     const fill = (sel, list) => { const cur = sel.dataset.cur; sel.insertAdjacentHTML('beforeend', list.filter(mine).map(x => `<option value="${x.id}" ${x.id === cur ? 'selected' : ''}>${esc(x.title)}</option>`).join('')); };
-    fill(f.video_id, vs); fill(f.t1_test, ts); fill(f.t2_test, ts);
+    fill(f.video_id, vs); fill(f.t1_test, ts); fill(f.t2_test, ts); fill(f.t1_quiz, qz); fill(f.t2_quiz, qz);
   }).catch(() => {});
   let tpls = [];
   const fillTpl = async () => { tpls = await q(sb.from('hw_templates').select('*').order('name'));
@@ -2526,6 +2798,7 @@ function recDay(main, head, cls, B, dayId) {
       ['t1_cut', 't2_cut', 'hw1_photos', 'hw2_photos'].forEach(k => { row[k] = v(k) === '' ? null : +v(k); });
       row.hw_due = v('hw_due') ? new Date(v('hw_due')).toISOString() : null;
       row.hw_target = f.hw_target.value; row.video_id = f.video_id.value || null; row.t1_test = f.t1_test.value || null; row.t2_test = f.t2_test.value || null;
+      row.t1_quiz = f.t1_quiz.value || null; row.t2_quiz = f.t2_quiz.value || null;
       const resync = row.t1_test !== (d.t1_test || null) || row.t2_test !== (d.t2_test || null);
       if (row.t1_mode === 'wrong' && row.t1_cut == null) row.t1_cut = +B.S.default_cut || 4;
       if (row.t2_mode === 'wrong' && row.t2_cut == null && row.t2_name) row.t2_cut = +B.S.default_cut || 4;
@@ -2541,7 +2814,7 @@ function recDay(main, head, cls, B, dayId) {
             row[k + '_unit'] && items.length ? `검사 범위: ${row[k + '_items']} (${items.length}${unitWord(row[k + '_unit'])})` : '',
             row[k + '_photos'] ? `사진 ${row[k + '_photos']}장 필요` : '',
             '한 장에 한 쪽씩 찍어 주세요. 두 쪽을 한 장에 찍으면 글씨가 작아져서 검사가 안 돼요.'].filter(Boolean).join('\n');
-          const asg = { class_id: cls.id, title: `${md}${row[k]}`, description: desc, due_at: row.hw_due, lock_after_due: true, photos_needed: row[k + '_photos'] || null, only_online: row.hw_target === 'online' };
+          const asg = { class_id: cls.id, title: `${md}${row[k]}`, description: desc, due_at: row.hw_due, lock_after_due: false, photos_needed: row[k + '_photos'] || null, only_online: row.hw_target === 'online' };
           if (d[k + '_asg']) await q(sb.from('assignments').update(asg).eq('id', d[k + '_asg']));
           else row[k + '_asg'] = (await q(sb.from('assignments').insert(asg).select('id').single())).id;
         } else if (d[k + '_asg']) {
@@ -2651,11 +2924,14 @@ async function recCheck(main, head, cls, B, dayId, k) {
   const urls = await signUrls('submissions', people.flatMap(r => { const s = B.sub(d, k, r); return s ? subFiles(s).filter(isImg).map(f => f.path) : []; }));
   let cur = null; try { cur = sessionStorage.getItem('chk|' + d.id + k); } catch (e) {}
   const done = r => { const x = B.rm[d.id + '|' + r.id]; return x && (x[k] || x[rk] != null); };
+  // 검사한 뒤에 마감 지나서 사진을 바꾼 학생 → 다시 확인
+  const recheck = r => { const x = B.rm[d.id + '|' + r.id], s = B.sub(d, k, r); return !!(s && s.edited_after_due && done(r) && x.updated_at && new Date(x.updated_at) < new Date(s.submitted_at)); };
   const chip = r => { const x = B.rm[d.id + '|' + r.id] || {}, s = B.sub(d, k, r), n = s ? subFiles(s).length : 0, need = d[k + '_photos'];
     const st = done(r) ? (x[rk] != null ? `${(+x[rk]).toFixed(0)}%` : x[k]) : n ? `사진 ${n}${need ? '/' + need : ''}` : d[k + '_asg'] ? '사진 없음' : '';
-    return `<button class="btn sm ${r.id === cur ? 'primary' : ''}" data-pick="${r.id}" style="${done(r) && r.id !== cur ? 'opacity:.6' : ''}">${done(r) ? '✓ ' : ''}${esc(r.name)} <span class="small" style="opacity:.75">${esc(st || '')}</span></button>`; };
+    return `<button class="btn sm ${r.id === cur ? 'primary' : ''}" data-pick="${r.id}" style="${recheck(r) && r.id !== cur ? 'border-color:var(--bad);color:var(--bad)' : done(r) && r.id !== cur ? 'opacity:.6' : ''}">${recheck(r) ? '🔁 ' : done(r) ? '✓ ' : ''}${esc(r.name)} <span class="small" style="opacity:.75">${esc(st || '')}</span></button>`; };
   const draw = () => {
-    const r = B.rosterById[cur] || people.find(p => !done(p)) || people[0]; cur = r?.id;
+    const r = B.rosterById[cur] || people.find(recheck) || people.find(p => !done(p)) || people[0]; cur = r?.id;
+    const again = people.filter(recheck);
     try { sessionStorage.setItem('chk|' + d.id + k, cur); } catch (e) {}
     const x = B.rm[d.id + '|' + r.id] || {}, s = B.sub(d, k, r), files = s ? subFiles(s) : [], need = d[k + '_photos'];
     const miss = new Set(Array.isArray(x[k + '_missing']) ? x[k + '_missing'] : []);
@@ -2664,11 +2940,14 @@ async function recCheck(main, head, cls, B, dayId, k) {
       <h2 style="margin:8px 0 4px">${esc(k === 'hw1' ? d.hw1_sms || d.hw1 : d.hw2)} 검사</h2>
       <p class="muted small" style="margin-top:0">${items.length ? `${esc(d[k + '_items'])} · ${items.length}${unitWord(d[k + '_unit'])}` : '검사 범위가 없어서 상태만 골라요 (수업일 설정에서 범위를 넣으면 번호 버튼이 생겨요)'}
         · 끝난 학생 ${people.filter(done).length}/${people.length}명</p>
+      ${again.length ? `<div style="background:var(--bad-weak);border-radius:10px;padding:10px 14px;margin-bottom:10px"><b style="color:var(--bad)">🔁 다시 확인할 학생 ${again.length}명</b>
+        <span class="small"> — 검사한 뒤에 마감이 지나서 사진을 고쳤어요: ${again.map(x => esc(x.name)).join(', ')}</span></div>` : ''}
       <div class="flex wrap" style="gap:6px;margin-bottom:14px">${people.map(chip).join('')}</div>
       <div class="card">
         <div class="flex between wrap"><h2 style="margin:0">${esc(r.name)} ${r.mode === '인강' ? '<span class="small muted">인강</span>' : ''}</h2>
           <span class="small ${files.length && need && files.length < need ? '' : 'muted'}" style="${files.length && need && files.length < need ? 'color:var(--bad);font-weight:700' : ''}">
           ${files.length ? `사진 ${files.length}${need ? '/' + need : ''}장 · ${fmtDate(s.submitted_at)}${s.edited_after_due ? ' · 마감 후 수정' : ''}` : d[k + '_asg'] ? '사진 없음 → 현장에서 봤으면 그대로 검사하세요' : '현장 검사'}</span></div>
+        ${s && (s.history || []).length ? `<div class="small" style="margin-top:8px">${recheck(r) ? '<b style="color:var(--bad)">제출 후 수정</b> · 아래가 새 사진이에요. ' : ''}<button class="linkbtn" id="hist">수정 전 사진 보기 (${s.history.length}번)</button></div>` : ''}
         ${files.length ? `<div class="upl-grid" style="margin-top:10px">${files.map((f2, i) => isImg(f2) && urls[f2.path] ? `<div class="upl-item"><img src="${urls[f2.path]}" data-view="${i}" alt=""><span class="new" style="background:#0007">${i + 1}</span></div>`
           : `<div class="upl-item"><div class="upl-file" data-file="${i}">📄<span>${esc(trunc(f2.name, 14))}</span></div></div>`).join('')}</div>` : ''}
         ${items.length ? `<p class="small muted" style="margin:14px 0 6px">안 한 ${unitWord(d[k + '_unit'])}만 누르세요 (다시 누르면 취소)</p>
@@ -2700,6 +2979,7 @@ async function recCheck(main, head, cls, B, dayId, k) {
     const imgs = files.filter(f2 => isImg(f2) && urls[f2.path]);
     main.querySelectorAll('[data-view]').forEach(im => im.onclick = () => lightbox(imgs.map(f2 => ({ url: urls[f2.path], name: f2.name })), imgs.indexOf(files[+im.dataset.view])));
     main.querySelectorAll('[data-file]').forEach(el => el.onclick = () => openFile('submissions', files[+el.dataset.file].path));
+    main.querySelector('#hist')?.addEventListener('click', () => showHistory({ x: s, s: { full_name: r.name } }, 'sub', { due_at: d.hw_due }));
     main.querySelector('#save').onclick = async e => {
       const btn = e.currentTarget; busy(btn, true);
       const p = calc(), rate = p == null ? null : Math.round(p * 10) / 10;
@@ -2709,7 +2989,7 @@ async function recCheck(main, head, cls, B, dayId, k) {
         B.rm[d.id + '|' + r.id] = old ? await q(sb.from('class_records').update(o).eq('id', old.id).select().single())
           : await q(sb.from('class_records').insert({ day_id: d.id, roster_id: r.id, ...o }).select().single());
         toast(`${r.name} ${o[k]}${rate != null ? ` (${rate}%)` : ''} 저장`);
-        const idx = people.indexOf(r), next = people.slice(idx + 1).find(p2 => !done(p2)) || people.find(p2 => !done(p2));
+        const idx = people.indexOf(r), next = people.find(recheck) || people.slice(idx + 1).find(p2 => !done(p2)) || people.find(p2 => !done(p2));
         if (next) { cur = next.id; draw(); window.scrollTo(0, 0); } else { toast('모든 학생 검사 끝! 🎉'); location.hash = `/t/records/${cls.id}/day/${d.id}`; }
       } catch (err) { busy(btn, false); }
     };
@@ -2846,17 +3126,23 @@ async function myBookCard(profileId, who) {
   const [days, S] = await Promise.all([q(sb.from('class_days').select('*').eq('class_id', r.class_id).order('day')), loadSettings()]);
   const recs = await q(sb.from('class_records').select('*').eq('roster_id', r.id));
   const asgIds = days.flatMap(d => [d.hw1_asg, d.hw2_asg]).filter(Boolean);
-  const subs = asgIds.length ? await q(sb.from('submissions').select('assignment_id,files,file_path,file_name').eq('user_id', profileId).in('assignment_id', asgIds)).catch(() => []) : [];
+  const cls = state.classes.find(c => c.id === r.class_id), over = d => dayOver(d, cls);
+  const subs = asgIds.length ? await q(sb.from('submissions').select('assignment_id,files,file_path,file_name,submitted_at,first_submitted_at').eq('user_id', profileId).in('assignment_id', asgIds)).catch(() => []) : [];
   const subOf = d => k => subs.find(x => x.assignment_id === d[k + '_asg']) || null;
   const rm = Object.fromEntries(recs.map(x => [x.day_id, x])), recOf = d => effRec(d, rm[d.id], subOf(d), r);
-  const open = REC.open(days, recOf, S, todayISO());
+  // 수업이 끝나기 전(시작 + 3시간 30분)에는 그날 결과·'응시 필요'를 안 보여 줘요
+  const shown = days.filter(over);
+  const open = REC.open(shown, recOf, S, todayISO());
+  const wk = new Date(Date.now() - 7 * 864e5); wk.setMinutes(wk.getMinutes() - wk.getTimezoneOffset());
+  const fixed = shown.flatMap(d => REC.items(d, recOf(d), S)).filter(x => x.bad && x.done && x.done >= wk.toISOString().slice(0, 10)).length;
+  if (who === 'student') state.myBook = { open: open.length, fixed };
   const bls = open.length ? await q(sb.from('bl_submissions').select('record_id,item_key,status,reply,created_at').eq('roster_id', r.id).order('created_at')).catch(() => []) : [];
-  const done = days.filter(d => d.day && d.day <= todayISO() && recOf(d)).sort((a, b) => b.day.localeCompare(a.day));
+  const done = days.filter(d => d.day && over(d) && recOf(d)).sort((a, b) => b.day.localeCompare(a.day));
   const last = done[0];
   const lastItems = last ? REC.items(last, recOf(last), S) : [];
   const lines = its => its.map(x => `<div class="flex between" style="padding:7px 0;border-bottom:1px solid var(--line);gap:8px"><span>${esc(x.kind === 'hw' ? '숙제 · ' + x.name : x.name + ' 테스트')}</span>
     ${badge(esc(x.short) + (x.bad && x.done ? ' → 완료' : ''), x.bad && x.done ? 'ok' : J_CLS[x.j] || '')}</div>`).join('');
-  const today = todayISO(), nextDay = days.filter(d => d.day && d.day >= today).sort((a, b) => a.day.localeCompare(b.day))[0];
+  const nextDay = days.filter(d => d.day && !over(d)).sort((a, b) => a.day.localeCompare(b.day))[0];
   const hwLine = (d, k) => { if (!d[k]) return ''; const sub = subOf(d)(k), asg = hwTargets(d, r) ? d[k + '_asg'] : null;
     const how = asg ? (sub ? badge('제출함', 'ok') : badge('사진 제출', 'blue')) : badge('현장 확인');
     const range = d[k + '_items'] ? `<div class="small muted">검사 범위: ${esc(d[k + '_items'])}${d[k + '_photos'] ? ` · 사진 ${d[k + '_photos']}장` : ''}</div>` : '';
@@ -2873,8 +3159,9 @@ async function myBookCard(profileId, who) {
       ${open.map(it => { const rec = rm[it.day.id], bs = rec && bls.filter(x => x.record_id === rec.id && x.item_key === it.key).pop();
         const st = !bs ? '' : bs.status === 'pending' ? badge('확인 대기', 'warn') : bs.status === 'redo' ? `${badge('다시 제출', 'bad')} <span class="small">${esc(bs.reply || '')}</span>` : '';
         const canSend = who !== 'parent' && rec && (!bs || bs.status === 'redo');
+        const quiz = who !== 'parent' && it.kind === 'test' && it.day[it.key + '_quiz'];
         return `<div class="flex between" style="margin-top:6px;gap:8px;align-items:center"><span class="small">${REC.md(it.day.day)} · ${esc(it.todo)} ${st}</span>
-          ${canSend ? `<button class="btn sm" style="flex-shrink:0" onclick="blSubmit('${rec.id}','${it.key}','${r.id}', this.dataset.l)" data-l="${esc(REC.md(it.day.day) + ' · ' + it.todo)}">📷 해결 제출</button>` : ''}</div>`; }).join('')}</div>`
+          ${quiz ? `<a class="btn sm primary" style="flex-shrink:0" href="#/quiz/${it.day.id}/${it.key}">📝 앱에서 재시험</a>` : canSend ? `<button class="btn sm" style="flex-shrink:0" onclick="blSubmit('${rec.id}','${it.key}','${r.id}', this.dataset.l)" data-l="${esc(REC.md(it.day.day) + ' · ' + it.todo)}">📷 해결 제출</button>` : ''}</div>`; }).join('')}</div>`
       : `<p class="small" style="color:var(--ok);font-weight:700;margin-top:0">밀린 숙제·재시험 없음 👍</p>`}
     ${last ? `<div class="small muted" style="margin-bottom:2px">${REC.md(last.day)} 수업 결과</div>${lines(lastItems)}` : ''}
     ${done.length > 1 ? `<details style="margin-top:10px"><summary class="small" style="font-weight:700">지난 수업 결과 보기</summary>
