@@ -544,8 +544,8 @@ async function route() {
 function layout(active) {
   const p = state.profile, T = isStaff(), P = p.role === 'parent';
   const items = P ? [['/', '홈'], ...(state.kids || []).map(k => ['/child/' + k.id, k.full_name])] : T
-    ? [['/t', '대시보드'], ['/t/records', '수업 기록'], ['/t/students', '학생 관리'], ['/t/videos', '수업 영상'], ['/t/assignments', '숙제'], ['/t/vocab', '테스트'], ['/t/qna', '질문'], ['/t/classes', '반 관리']]
-    : [['/', '홈'], ['/videos', '수업 영상'], ['/assignments', '숙제'], ['/vocab', '테스트'], ['/qna', '질문'], ['/report', '내 성적']];
+    ? [['/t', '대시보드'], ['/t/records', '수업 기록'], ['/t/students', '학생 관리'], ['/t/videos', '수업 영상'], ['/t/assignments', '숙제'], ['/t/vocab', '테스트'], ['/t/qna', '질문'], ['/t/classes', '반 관리'], ['/t/courses', '인강·판매 관리']]
+    : [['/', '홈'], ['/videos', '수업 영상'], ['/assignments', '숙제'], ['/vocab', '테스트'], ['/qna', '질문'], ['/report', '내 성적'], ['/courses', '인강 강좌'], ['/my-courses', '나의 인강']];
   $app.innerHTML = `<div class="layout">
     <aside class="side"><img src="icons/emblem.png" alt="송지희 국어" class="m-logo"><div class="brand"><img src="icons/logo-horizontal.png" alt="${esc(SITE_NAME)}">${VERSION_TAG ? `<small>${VERSION_TAG}</small>` : ''}</div>
       <nav class="nav">${items.map(([h, l]) => `<a href="#${h}" class="${h === active ? 'on' : ''}">${l}</a>`).join('')}
@@ -822,12 +822,115 @@ async function mountPlayer(v, tracker) {
   }
 }
 
+
+/* =====================================================================
+   유료 인강 모듈: 강좌/수강 신청/수강권/진도
+   결제는 연결 전. 신청 후 선생님이 입금 확인하여 수강권을 승인합니다.
+   반드시 supabase/online_courses.sql을 먼저 실행합니다.
+   ===================================================================== */
+const formatWon = n => Number(n || 0).toLocaleString('ko-KR') + '원';
+const fmtDay = d => d ? new Date(d).toLocaleDateString('ko-KR') : '—';
+const courseStatus = c => c.published ? badge('판매 중','ok') : badge('비공개','warn');
+const onlineNotice = '<p class="muted small">현재 온라인 카드 결제는 연결 전입니다. 수강 신청은 결제가 아니며, 선생님이 입금을 확인하고 승인해야 강의를 볼 수 있어요. 결제 안내는 별도로 전달됩니다.</p>';
+function courseMissing(main,e) { main.innerHTML = `<h1 class="page">인강 강좌</h1><div class="card"><b>인강 데이터베이스 설정이 필요해요.</b><p class="muted small">관리자가 supabase/online_courses.sql을 Supabase SQL Editor에서 실행해야 합니다.</p><p class="muted small">${esc(e.message || e)}</p></div>`; }
+async function sCourses() {
+  const main=layout('/courses');
+  try {
+    const courses=await q(sb.from('online_courses').select('id,title,summary,price_krw,duration_days,published,created_at').eq('published',true).order('created_at',{ascending:false}));
+    main.innerHTML=`<h1 class="page">온라인 강좌</h1><div class="card"><h2>송지희 국어 온라인 클래스</h2><p class="muted">현장 수업과 같은 계정으로 인강을 신청하고 관리할 수 있어요.</p></div><div class="vgrid">${courses.map(c=>`<a href="#/course/${c.id}" class="vcard"><div class="body"><h2>${esc(c.title)}</h2><p class="small muted">${esc(c.summary||'')}</p><b>${formatWon(c.price_krw)}</b><p class="small muted">수강 기간 ${c.duration_days}일</p><span class="btn primary sm">강좌 보기</span></div></a>`).join('')}</div>${courses.length?'':`<div class="card">${empty('등록된 강좌가 없어요')}</div>`}`;
+  } catch(e){courseMissing(main,e)}
+}
+async function sMyCourses() {
+  const main=layout('/my-courses');
+  try {
+    const [enroll, requests]=await Promise.all([
+      q(sb.from('online_enrollments').select('id,course_id,starts_at,ends_at').eq('user_id',uid()).order('created_at',{ascending:false})),
+      q(sb.from('online_course_requests').select('id,course_id,status,created_at').eq('user_id',uid()).order('created_at',{ascending:false}))
+    ]);
+    const ids=[...new Set([...enroll,...requests].map(x=>x.course_id))];
+    const courses=ids.length?await q(sb.from('online_courses').select('id,title,price_krw').in('id',ids)):[];
+    const names=Object.fromEntries(courses.map(x=>[x.id,x.title]));
+    const active=enroll.filter(e=>new Date(e.starts_at)<=new Date() && new Date(e.ends_at)>new Date());
+    main.innerHTML=`<h1 class="page">나의 인강</h1><div class="card"><h2>수강 중인 강좌</h2>${active.length?active.map(e=>`<a href="#/course/${e.course_id}" class="row"><div class="row-main"><b>${esc(names[e.course_id]||'강좌')}</b><p class="small muted">${fmtDay(e.ends_at)}까지 수강 가능</p></div>강의실 열기 →</a>`).join(''):empty('수강 중인 강좌가 없어요')}</div><div class="card"><h2>수강 신청 현황</h2>${requests.length?requests.map(r=>`<div class="row"><div class="row-main"><b>${esc(names[r.course_id]||'강좌')}</b><p class="small muted">${fmtDay(r.created_at)}</p></div>${badge(({pending:'승인 대기',approved:'승인 완료',rejected:'반려'})[r.status]||r.status, r.status==='approved'?'ok': 'warn')}</div>`).join(''):empty('수강 신청 내역이 없어요')}</div>${onlineNotice}`;
+  } catch(e){courseMissing(main,e)}
+}
+async function sCourse(id){
+  const main=layout('/courses');
+  try {
+    const c=await q(sb.from('online_courses').select('*').eq('id',id).maybeSingle());
+    if(!c||!c.published){main.innerHTML='<div class="card">강좌가 없어요.</div>';return;}
+    const [enroll, request, lessons]=await Promise.all([
+      q(sb.from('online_enrollments').select('*').eq('course_id',id).eq('user_id',uid()).maybeSingle()),
+      q(sb.from('online_course_requests').select('*').eq('course_id',id).eq('user_id',uid()).order('created_at',{ascending:false}).limit(1).maybeSingle()),
+      q(sb.from('online_course_lessons').select('id,title,order_no,duration_minutes').eq('course_id',id).order('order_no'))
+    ]);
+    const access=enroll&&new Date(enroll.starts_at)<=new Date()&&new Date(enroll.ends_at)>new Date();
+    const prog=access?await q(sb.from('online_lesson_progress').select('lesson_id,percent,completed').eq('user_id',uid()).in('lesson_id',lessons.map(l=>l.id).length?lessons.map(l=>l.id):['00000000-0000-0000-0000-000000000000'])):[];
+    const pm=Object.fromEntries(prog.map(x=>[x.lesson_id,x]));
+    main.innerHTML=`<a href="#/courses" class="back">← 전체 강좌</a><h1 class="page">${esc(c.title)}</h1><div class="card"><p>${esc(c.summary||'')}</p><p><b>${formatWon(c.price_krw)}</b> · ${c.duration_days}일 수강</p>${access?badge(`${fmtDay(enroll.ends_at)}까지 이용 가능`,'ok'):request?.status==='pending'?badge('수강 신청 승인 대기','warn'):`<button class="btn primary" id="courseRequest">수강 신청하기</button>`}${!access?onlineNotice:''}</div><div class="card"><h2>커리큘럼 (${lessons.length}강)</h2>${lessons.map((l,i)=>`<div class="row"><div class="row-main"><b>${i+1}. ${esc(l.title)}</b><div class="small muted">${l.duration_minutes||0}분 ${access?'· '+(pm[l.id]?.completed?'완료':(pm[l.id]?.percent||0)+'%'):''}</div></div>${access?`<a class="btn sm" href="#/lesson/${l.id}">시청</a>`:'<span class="muted small">수강권 필요</span>'}</div>`).join('')||empty('강의 준비 중입니다')}</div>`;
+    const btn=document.getElementById('courseRequest');
+    if(btn)btn.onclick=async()=>{if(!confirm('수강 신청을 접수할까요? 신청만으로 결제되거나 수강권이 발급되지는 않습니다.'))return;btn.disabled=true;try{await q(sb.from('online_course_requests').insert({course_id:id,user_id:uid()}));toast('신청이 접수됐어요. 입금·승인 안내를 확인해 주세요.');route()}catch(e){btn.disabled=false}};
+  } catch(e){courseMissing(main,e)}
+}
+async function sLesson(id){
+  const main=layout('/my-courses');
+  try {
+    const l=await q(sb.from('online_course_lessons').select('*').eq('id',id).maybeSingle());
+    if(!l){main.innerHTML='<div class="card">수강권이 없거나 강의를 찾을 수 없어요.</div>';return;}
+    const enrollment=await q(sb.from('online_enrollments').select('id,starts_at,ends_at').eq('course_id',l.course_id).eq('user_id',uid()).maybeSingle());
+    if(!enrollment||new Date(enrollment.starts_at)>new Date()||new Date(enrollment.ends_at)<=new Date()){main.innerHTML='<div class="card">현재 유효한 수강권이 없어요.</div>';return;}
+    const prog=await q(sb.from('online_lesson_progress').select('*').eq('lesson_id',id).eq('user_id',uid()).maybeSingle());
+    // 관리자가 등록한 YouTube 영상 ID만 임베드 허용. 외부 URL 전체를 임의로 넣지 않음.
+    const media=await q(sb.from('online_lesson_media').select('youtube_id').eq('lesson_id',id).maybeSingle());
+    const yt=/^[A-Za-z0-9_-]{11}$/.test(media?.youtube_id||'')?media.youtube_id:null;
+    main.innerHTML=`<a href="#/course/${l.course_id}" class="back">← 강좌로 돌아가기</a><h1 class="page">${esc(l.title)}</h1>${yt?`<div class="player-wrap"><iframe title="${esc(l.title)}" src="https://www.youtube-nocookie.com/embed/${yt}?enablejsapi=1" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></div>`:`<div class="card">${empty('영상이 아직 등록되지 않았어요')}</div>`}<div class="card"><h2>학습 진도</h2><p class="small muted">이 강좌의 진도는 직접 완료 처리하는 방식입니다. 영상 시청 시간을 자동 검증하지 않습니다.</p><p>${prog?.completed?'✅ 완료':'미완료'}</p><button id="markLesson" class="btn primary">${prog?.completed?'미완료로 변경':'수강 완료 표시'}</button></div>${l.description?`<div class="card"><h2>학습 안내</h2><p class="pre">${esc(l.description)}</p></div>`:''}`;
+    document.getElementById('markLesson').onclick=async()=>{await q(sb.from('online_lesson_progress').upsert({user_id:uid(),lesson_id:id,percent:prog?.completed?0:100,completed:!prog?.completed},{onConflict:'user_id,lesson_id'}));toast('진도를 저장했어요');route()};
+  } catch(e){courseMissing(main,e)}
+}
+async function tCourses(){
+  const main=layout('/t/courses');
+  if(!isHead()){main.innerHTML='<div class="card">강좌 판매 관리는 담당 선생님 계정만 사용할 수 있어요.</div>';return}
+  try {
+    const [courses,requests,enrollments,students]=await Promise.all([
+      q(sb.from('online_courses').select('*').order('created_at',{ascending:false})),
+      q(sb.from('online_course_requests').select('*').order('created_at',{ascending:false}).limit(100)),
+      q(sb.from('online_enrollments').select('*').order('created_at',{ascending:false}).limit(100)),
+      q(sb.from('profiles').select('id,full_name,email,role').eq('role','student').order('full_name'))
+    ]);
+    const names=Object.fromEntries(students.map(x=>[x.id,x.full_name||x.email]));
+    const cn=Object.fromEntries(courses.map(x=>[x.id,x.title]));
+    main.innerHTML=`<h1 class="page">인강·판매 관리</h1><div class="card"><h2>새 강좌 등록</h2><form id="newCourse"><label>강좌명<input name="title" required maxlength="120" placeholder="예: 고1 국어 12월 4주 완성"></label><label>강좌 소개<textarea name="summary" maxlength="1000"></textarea></label><div class="grid" style="grid-template-columns:1fr 1fr"><label>가격(원)<input name="price" type="number" min="0" step="1000" value="240000" required></label><label>수강 기간(일)<input name="duration" type="number" min="1" max="365" value="28" required></label></div><button class="btn primary">강좌 만들기 (기본 비공개)</button></form></div><div class="card"><h2>강좌 목록</h2>${courses.map(c=>`<div class="row"><div class="row-main"><a href="#/t/courses/${c.id}"><b>${esc(c.title)}</b></a><div class="muted small">${formatWon(c.price_krw)} · ${c.duration_days}일</div></div>${courseStatus(c)} <a class="btn sm" href="#/t/courses/${c.id}">강의 관리</a></div>`).join('')||empty('등록된 강좌가 없어요')}</div><div class="card"><h2>수강 신청 (승인 대기)</h2>${requests.filter(r=>r.status==='pending').map(r=>`<div class="row"><div class="row-main"><b>${esc(names[r.user_id]||r.user_id)}</b><div class="small muted">${esc(cn[r.course_id]||r.course_id)} · ${fmtDay(r.created_at)}</div></div><button class="btn primary sm" data-approve="${r.id}">입금 확인 후 승인</button> <button class="btn sm" data-reject="${r.id}">반려</button></div>`).join('')||empty('대기 중인 신청이 없어요')}</div><div class="card"><h2>최근 수강권</h2>${enrollments.map(e=>`<div class="row"><div class="row-main"><b>${esc(names[e.user_id]||e.user_id)}</b><div class="small muted">${esc(cn[e.course_id]||e.course_id)} · 종료 ${fmtDay(e.ends_at)}</div></div></div>`).join('')||empty('발급한 수강권이 없어요')}</div><p class="small muted">※ 카드 자동결제·매출 정산은 아직 연동 전입니다. 수강권 승인은 실제 입금 확인 후에만 진행하세요.</p>`;
+    document.getElementById('newCourse').onsubmit=async e=>{e.preventDefault();const f=e.target;const b=f.querySelector('button');b.disabled=true;try{await q(sb.from('online_courses').insert({title:f.elements['title'].value.trim(),summary:f.elements['summary'].value.trim(),price_krw:Number(f.elements['price'].value),duration_days:Number(f.elements['duration'].value),published:false}));toast('비공개 강좌를 만들었어요');route()}catch(err){b.disabled=false}};
+    main.querySelectorAll('[data-approve]').forEach(b=>b.onclick=async()=>{if(!confirm('실제 입금을 확인했나요? 확인한 경우에만 수강권을 발급하세요.'))return;b.disabled=true;try{await q(sb.rpc('approve_online_course_request',{p_request_id:b.dataset.approve}));toast('수강권을 발급했어요');route()}catch(err){b.disabled=false}});
+    main.querySelectorAll('[data-reject]').forEach(b=>b.onclick=async()=>{if(!confirm('신청을 반려할까요?'))return;b.disabled=true;try{await q(sb.from('online_course_requests').update({status:'rejected'}).eq('id',b.dataset.reject));toast('반려했어요');route()}catch(err){b.disabled=false}});
+  }catch(e){courseMissing(main,e)}
+}
+async function tCourseDetail(id){
+  const main=layout('/t/courses');
+  if(!isHead()){main.innerHTML='<div class="card">권한이 없어요.</div>';return}
+  try{
+    const c=await q(sb.from('online_courses').select('*').eq('id',id).single());
+    const lessons=await q(sb.from('online_course_lessons').select('*').eq('course_id',id).order('order_no'));
+    const media=lessons.length?await q(sb.from('online_lesson_media').select('lesson_id,youtube_id').in('lesson_id',lessons.map(x=>x.id))):[];
+    const videoIds=Object.fromEntries(media.map(x=>[x.lesson_id,x.youtube_id]));
+    main.innerHTML=`<a href="#/t/courses" class="back">← 강좌 관리</a><h1 class="page">${esc(c.title)}</h1><div class="card"><h2>강좌 설정</h2><form id="editCourse"><label>강좌명<input name="title" value="${esc(c.title)}" required></label><label>강좌 소개<textarea name="summary">${esc(c.summary||'')}</textarea></label><label>가격(원)<input name="price" type="number" min="0" value="${c.price_krw}" required></label><label>수강 기간(일)<input name="duration" type="number" min="1" max="365" value="${c.duration_days}" required></label><label class="inline"><input type="checkbox" name="published" ${c.published?'checked':''}> 강좌 공개</label><div><button class="btn primary">강좌 저장</button></div></form></div><div class="card"><h2>새 강의 추가</h2><form id="newLesson"><label>영상 제목<input name="title" required maxlength="200" placeholder="1강 — 문학 독해"></label><label>YouTube 영상 ID (11자리)<input name="youtube_id" pattern="[A-Za-z0-9_-]{11}" placeholder="영상 링크의 v= 뒤 11자리" maxlength="11"></label><div class="grid" style="grid-template-columns:1fr 1fr"><label>강의 순서<input name="order_no" type="number" min="1" value="${lessons.length+1}" required></label><label>예상 강의 시간(분)<input name="duration_minutes" type="number" min="0" value="180"></label></div><label>강의 안내<textarea name="description"></textarea></label><button class="btn primary">강의 등록</button></form><p class="small muted">주의: YouTube 비공개 영상은 일반 임베드 재생이 안 됩니다. 미등록/일부공개 YouTube 링크는 유출될 수 있어 유료 판매용 보안 영상 호스팅으로 전환하는 것을 권장합니다.</p></div><div class="card"><h2>등록된 강의 (${lessons.length})</h2>${lessons.map(l=>`<div class="row"><div class="row-main"><b>${l.order_no}강 · ${esc(l.title)}</b><p class="small muted">${videoIds[l.id]?'영상 ID 등록됨':'영상 미등록'} · ${l.duration_minutes||0}분</p></div><button class="btn sm" data-editlesson="${l.id}">영상 ID 수정</button><button class="btn danger sm" data-dellesson="${l.id}">삭제</button></div>`).join('')||empty('등록된 강의가 없어요')}</div>`;
+    document.getElementById('editCourse').onsubmit=async e=>{e.preventDefault();const f=e.target;await q(sb.from('online_courses').update({title:f.elements['title'].value.trim(),summary:f.elements['summary'].value.trim(),price_krw:Number(f.elements['price'].value),duration_days:Number(f.elements['duration'].value),published:f.elements['published'].checked}).eq('id',id));toast('저장했어요');route()};
+    document.getElementById('newLesson').onsubmit=async e=>{e.preventDefault();const f=e.target;const newLesson=await q(sb.from('online_course_lessons').insert({course_id:id,title:f.elements['title'].value.trim(),order_no:Number(f.elements['order_no'].value),duration_minutes:Number(f.elements['duration_minutes'].value),description:f.elements['description'].value.trim()||null}).select('id').single());if(f.elements['youtube_id'].value.trim())await q(sb.from('online_lesson_media').insert({lesson_id:newLesson.id,youtube_id:f.elements['youtube_id'].value.trim()}));toast('강의를 등록했어요');route()};
+    main.querySelectorAll('[data-editlesson]').forEach(b=>b.onclick=async()=>{const l=lessons.find(x=>x.id===b.dataset.editlesson);const v=prompt('YouTube 영상 ID 11자리 (비우면 영상 연결 해제)',videoIds[l.id]||'');if(v===null)return;if(v&&!/^[A-Za-z0-9_-]{11}$/.test(v)){toast('영상 ID는 11자리여야 해요','err');return;}if(v)await q(sb.from('online_lesson_media').upsert({lesson_id:l.id,youtube_id:v},{onConflict:'lesson_id'}));else await q(sb.from('online_lesson_media').delete().eq('lesson_id',l.id));route()});
+    main.querySelectorAll('[data-dellesson]').forEach(b=>b.onclick=async()=>{if(!confirm('강의를 삭제할까요? 진도 기록도 삭제됩니다.'))return;await q(sb.from('online_course_lessons').delete().eq('id',b.dataset.dellesson));route()});
+  }catch(e){courseMissing(main,e)}
+}
+
 /* =====================================================================
    학생 화면
    ===================================================================== */
 async function studentRoute([a, b, c]) {
   if (a === 't') { location.hash = '/'; return; }
   if (!a) return sHome();
+  if (a === 'courses') return sCourses();
+  if (a === 'my-courses') return sMyCourses();
+  if (a === 'course') return sCourse(b);
+  if (a === 'lesson') return sLesson(b);
   if (a === 'videos') return sVideos();
   if (a === 'video') return sVideo(b);
   if (a === 'assignments') return sAssignments();
@@ -1369,7 +1472,7 @@ function wireVocabForm(f) {
   f.title.addEventListener('input', () => { f.title.dataset.auto = ''; });
   f.category.addEventListener('input', () => {
     const c = f.category.value.trim();
-    if (f.title.dataset.auto) f.title.value = weekTitle(c || '테스트');
+    if (f.title.dataset.auto) f.elements['title'].value = weekTitle(c || '테스트');
     if (f.title.dataset.auto !== undefined && /모고|모의/.test(c) && !f.dataset.id) {
       f.querySelector('[name=grading][value=staff]').checked = true; f.use_grade.checked = true; upd();
       if (!f.total.dataset.touched) f.total.value = 100;
@@ -1378,7 +1481,7 @@ function wireVocabForm(f) {
   upd();
 }
 async function saveVocab(f, existing) {
-  const row = { title: f.title.value.trim(), category: f.category.value.trim() || '테스트', grading: f.grading.value, class_id: f.class_id.value || null, total: +f.total.value,
+  const row = { title: f.elements['title'].value.trim(), category: f.category.value.trim() || '테스트', grading: f.grading.value, class_id: f.class_id.value || null, total: +f.total.value,
     open_at: f.open_at.value ? new Date(f.open_at.value).toISOString() : new Date().toISOString(),
     due_at: f.due_at.value ? new Date(f.due_at.value).toISOString() : null, video_id: f.video_id.value || null,
     require_photo: f.grading.value === 'self' && f.require_photo.checked, lock_after_due: f.lock_after_due.checked, use_grade: f.use_grade.checked };
@@ -1760,6 +1863,7 @@ async function teacherRoute([a, b, c, d, e, f]) {
   const pages = { students: tStudents, student: tStudent, classes: tClasses, videos: tVideos, video: tVideo,
                   assignments: tAssignments, assignment: tAssignment, vocab: c => c ? tVocab(c) : tVocabList(), report: tReport };
   if (!b) return tDash();
+  if (b === 'courses') return c ? tCourseDetail(c) : tCourses();
   if (b === 'records') return tRecords(c, d, e, f);
   if (b === 'qna') return tQna(c);
   if (pages[b]) return pages[b](c);
@@ -2134,8 +2238,8 @@ async function tVideos() {
   });
   f.onsubmit = async e => {
     e.preventDefault();
-    const row = { title: f.title.value.trim(), description: f.description.value.trim() || null, class_id: f.class_id.value || null,
-                  published: f.published.checked, no_skip: f.no_skip.checked, source: f.source.value };
+    const row = { title: f.elements['title'].value.trim(), description: f.description.value.trim() || null, class_id: f.class_id.value || null,
+                  published: f.elements['published'].checked, no_skip: f.no_skip.checked, source: f.source.value };
     const btn = f.querySelector('button.primary');
     if (row.source === 'youtube') {
       const lines = f.url.value.split(/\s+/).map(x => x.trim()).filter(Boolean), ids = lines.map(ytId);
@@ -2196,8 +2300,8 @@ async function tVideo(id) {
   const f = document.getElementById('f');
   f.onsubmit = async e => {
     e.preventDefault();
-    await q(sb.from('videos').update({ title: f.title.value.trim(), description: f.description.value.trim() || null,
-      class_id: f.class_id.value || null, published: f.published.checked, no_skip: f.no_skip.checked }).eq('id', id));
+    await q(sb.from('videos').update({ title: f.elements['title'].value.trim(), description: f.description.value.trim() || null,
+      class_id: f.class_id.value || null, published: f.elements['published'].checked, no_skip: f.no_skip.checked }).eq('id', id));
     toast('저장했어요'); route();
   };
   await mountPlayer(v, null);
@@ -2215,7 +2319,7 @@ function assignForm(a = {}, videos = []) {
     <div class="full"><label class="inline"><input type="checkbox" name="lock_after_due" ${a.lock_after_due !== false ? 'checked' : ''}> 마감 후 수정 막기 <span class="muted small">(마감 전 대충 내고 나중에 바꿔치기 방지)</span></label></div></div>`;
 }
 async function saveAssignment(f, existing) {
-  const row = { title: f.title.value.trim(), description: f.description.value.trim() || null, class_id: f.class_id.value || null,
+  const row = { title: f.elements['title'].value.trim(), description: f.description.value.trim() || null, class_id: f.class_id.value || null,
                 due_at: f.due_at.value ? new Date(f.due_at.value).toISOString() : null, video_id: f.video_id.value || null, lock_after_due: f.lock_after_due.checked };
   const file = f.file.files[0];
   if (file) {
@@ -3289,7 +3393,7 @@ async function recFees(main, head, cls, B, feeId) {
   const f = main.querySelector('#ff');
   f.onsubmit = async e => {
     e.preventDefault();
-    const nf = await q(sb.from('fees').insert({ class_id: cls.id, title: f.title.value.trim(), amount: +f.amount.value }).select().single());
+    const nf = await q(sb.from('fees').insert({ class_id: cls.id, title: f.elements['title'].value.trim(), amount: +f.amount.value }).select().single());
     const targets = B.roster.filter(r => r.status === '재원');
     if (targets.length) await q(sb.from('fee_items').insert(targets.map(r => ({ fee_id: nf.id, roster_id: r.id }))));
     toast('교재비를 만들었어요'); location.hash = `/t/records/${cls.id}/fees/${nf.id}`;
